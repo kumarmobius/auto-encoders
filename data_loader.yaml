@@ -1,4 +1,4 @@
-name: Dataset downloader and splitter from CDN (PyTorch)
+name: Dataset downloader and splitter
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
@@ -66,35 +66,90 @@ implementation:
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
 
-        def candidate_urls(url):
-            if "$$$_" in url:
-                return [url, url.replace("$$$_", "$$_")]
-            return [url]
+        def download_file(url):
+            try:
+                logger.info("Downloading from: %s", url)
+                r = session.get(url, headers=headers, timeout=60)
+                r.raise_for_status()
+                fd, tmp = tempfile.mkstemp()
+                os.close(fd)
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                logger.info("Successfully downloaded to: %s", tmp)
+                return tmp
+            except Exception as e:
+                logger.error("Download failed for %s: %s", url, str(e))
+                raise
 
-        def download_with_fallback(url):
-            last_err = None
-            for u in candidate_urls(url):
+        def load_data_multi_format(file_path):
+            logger.info("Loading data from: %s", file_path)
+            
+            # List of loading strategies to try
+            strategies = [
+                # Strategy 1: PyTorch Tensor
+                {
+                    'name': 'PyTorch Tensor',
+                    'func': lambda: torch.load(file_path, map_location='cpu').numpy() 
+                            if isinstance(torch.load(file_path, map_location='cpu'), torch.Tensor)
+                            else torch.load(file_path, map_location='cpu')
+                },
+                # Strategy 2: NumPy array (.npy)
+                {
+                    'name': 'NumPy (.npy)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)
+                },
+                # Strategy 3: NumPy compressed (.npz)
+                {
+                    'name': 'NumPy (.npz)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)['data']
+                },
+                # Strategy 4: Parquet
+                {
+                    'name': 'Parquet',
+                    'func': lambda: pd.read_parquet(file_path, engine="pyarrow").values
+                },
+                # Strategy 5: CSV
+                {
+                    'name': 'CSV',
+                    'func': lambda: pd.read_csv(file_path).values
+                },
+                # Strategy 6: Excel
+                {
+                    'name': 'Excel',
+                    'func': lambda: pd.read_excel(file_path).values
+                },
+                # Strategy 7: Tab-separated values
+                {
+                    'name': 'TSV',
+                    'func': lambda: pd.read_csv(file_path, sep='\t').values
+                },
+            ]
+            
+            # Try each strategy
+            last_error = None
+            for strategy in strategies:
                 try:
-                    logger.info("Trying download: %s", u)
-                    r = session.get(u, headers=headers, timeout=60)
-                    r.raise_for_status()
-                    fd, tmp = tempfile.mkstemp(suffix='.csv')
-                    os.close(fd)
-                    with open(tmp, "wb") as f:
-                        f.write(r.content)
-                    logger.info("Successfully downloaded to: %s", tmp)
-                    return tmp
+                    logger.info("Trying to load as: %s", strategy['name'])
+                    data = strategy['func']()
+                    
+                    # Convert to numpy array if needed
+                    if isinstance(data, torch.Tensor):
+                        data = data.numpy()
+                    elif not isinstance(data, np.ndarray):
+                        data = np.array(data)
+                    
+                    logger.info("✓ Successfully loaded as %s with shape: %s", 
+                               strategy['name'], data.shape)
+                    return data
+                    
                 except Exception as e:
-                    logger.warning("Download failed for %s: %s", u, str(e))
-                    last_err = e
-            raise last_err
-
-        def load_csv_data(file_path):
-            logger.info("Loading CSV from: %s", file_path)
-            df = pd.read_parquet(file_path,engine="pyarrow")
-            data = df.values
-            logger.info("Loaded data shape: %s", data.shape)
-            return data
+                    logger.debug("Failed to load as %s: %s", strategy['name'], str(e))
+                    last_error = e
+                    continue
+            
+            # If all strategies failed, raise the last error
+            logger.error("All loading strategies failed!")
+            raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
 
         def save_pytorch_dataset(dataset_tensors, output_path, dataset_name):
             os.makedirs(output_path, exist_ok=True)
@@ -123,13 +178,13 @@ implementation:
             # Download and Load Data
             # ============================================
             logger.info("Downloading tensor values...")
-            tensor_file = download_with_fallback(args.tensor_values_cdn)
-            X = load_csv_data(tensor_file)
+            tensor_file = download_file(args.tensor_values_cdn)
+            X = load_data_multi_format(tensor_file)
             os.remove(tensor_file)
             
             logger.info("Downloading masked tensor values...")
-            masked_file = download_with_fallback(args.masked_tensor_values_cdn)
-            M = load_csv_data(masked_file)
+            masked_file = download_file(args.masked_tensor_values_cdn)
+            M = load_data_multi_format(masked_file)
             os.remove(masked_file)
             
             logger.info("X shape: %s, M shape: %s", X.shape, M.shape)
