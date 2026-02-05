@@ -1,0 +1,432 @@
+name: Mask Aware Autoencoder Builder
+description: Build a Mask-Aware Autoencoder model in PyTorch from YAML configuration and save as .pth file
+inputs:
+  # Model Architecture Parameters
+  - {name: feature_dim, type: Integer, description: "Number of input features (e.g., 16197)", default: "16197"}
+  - {name: latent_dim, type: Integer, description: "Latent space dimension (e.g., 128)", default: "128"}
+  
+  # Encoder Layer Configuration
+  - {name: encoder_layer1_units, type: Integer, description: "Encoder first layer units", default: "1024"}
+  - {name: encoder_layer2_units, type: Integer, description: "Encoder second layer units", default: "256"}
+  - {name: encoder_activation, type: String, description: "Encoder activation function (relu, tanh, elu)", default: "relu"}
+  - {name: encoder_dropout, type: Float, description: "Encoder dropout rate", default: "0.0"}
+  - {name: encoder_batch_norm, type: String, description: "Use batch normalization in encoder (true/false)", default: "false"}
+  
+  # Decoder Layer Configuration
+  - {name: decoder_layer1_units, type: Integer, description: "Decoder first layer units", default: "256"}
+  - {name: decoder_layer2_units, type: Integer, description: "Decoder second layer units", default: "1024"}
+  - {name: decoder_activation, type: String, description: "Decoder activation function (relu, tanh, elu)", default: "relu"}
+  - {name: decoder_dropout, type: Float, description: "Decoder dropout rate", default: "0.0"}
+  - {name: decoder_batch_norm, type: String, description: "Use batch normalization in decoder (true/false)", default: "false"}
+  
+  # Initialization
+  - {name: weight_init, type: String, description: "Weight initialization method (xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal)", default: "xavier_uniform"}
+  - {name: bias_init, type: String, description: "Bias initialization method (zeros, ones, uniform)", default: "zeros"}
+  
+  # Model Metadata
+  - {name: model_name, type: String, description: "Name for the saved model", default: "mask_aware_autoencoder"}
+  - {name: random_seed, type: Integer, description: "Random seed for reproducibility", default: "42"}
+
+outputs:
+  - {name: model_file, type: Model, description: "Built PyTorch model saved as .pth file"}
+  - {name: model_config, type: String, description: "Model configuration JSON file"}
+
+implementation:
+  container:
+    image: nikhilv215/nesy-factory:v22
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import os
+        import sys
+        import argparse
+        import traceback
+        import json
+        import torch
+        import torch.nn as nn
+        
+        # ============================================
+        # Argument Parser
+        # ============================================
+        parser = argparse.ArgumentParser(description="Build Mask-Aware Autoencoder Model")
+        
+        # Model architecture
+        parser.add_argument("--feature_dim", type=int, required=True)
+        parser.add_argument("--latent_dim", type=int, required=True)
+        
+        # Encoder config
+        parser.add_argument("--encoder_layer1_units", type=int, required=True)
+        parser.add_argument("--encoder_layer2_units", type=int, required=True)
+        parser.add_argument("--encoder_activation", type=str, required=True)
+        parser.add_argument("--encoder_dropout", type=float, required=True)
+        parser.add_argument("--encoder_batch_norm", type=str, required=True)
+        
+        # Decoder config
+        parser.add_argument("--decoder_layer1_units", type=int, required=True)
+        parser.add_argument("--decoder_layer2_units", type=int, required=True)
+        parser.add_argument("--decoder_activation", type=str, required=True)
+        parser.add_argument("--decoder_dropout", type=float, required=True)
+        parser.add_argument("--decoder_batch_norm", type=str, required=True)
+        
+        # Initialization
+        parser.add_argument("--weight_init", type=str, required=True)
+        parser.add_argument("--bias_init", type=str, required=True)
+        
+        # Metadata
+        parser.add_argument("--model_name", type=str, required=True)
+        parser.add_argument("--random_seed", type=int, required=True)
+        
+        # Outputs
+        parser.add_argument("--model_file", type=str, required=True)
+        parser.add_argument("--model_config", type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        print("[model_builder] Starting Mask-Aware Autoencoder model building...")
+        print(f"[model_builder] Feature dimension: {args.feature_dim}")
+        print(f"[model_builder] Latent dimension: {args.latent_dim}")
+        
+        # ============================================
+        # Set Random Seed
+        # ============================================
+        torch.manual_seed(args.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.random_seed)
+        print(f"[model_builder] Random seed set to: {args.random_seed}")
+        
+        # ============================================
+        # Helper Functions
+        # ============================================
+        def str_to_bool(s):
+            return s.lower() in ['true', '1', 'yes']
+        
+        def get_activation(name):
+            activations = {
+                'relu': nn.ReLU(),
+                'tanh': nn.Tanh(),
+                'elu': nn.ELU(),
+                'leaky_relu': nn.LeakyReLU(),
+                'sigmoid': nn.Sigmoid(),
+                'none': None
+            }
+            return activations.get(name.lower(), nn.ReLU())
+        
+        def init_weights(module, weight_init, bias_init):
+            if isinstance(module, nn.Linear):
+                # Weight initialization
+                if weight_init == 'xavier_uniform':
+                    nn.init.xavier_uniform_(module.weight)
+                elif weight_init == 'xavier_normal':
+                    nn.init.xavier_normal_(module.weight)
+                elif weight_init == 'kaiming_uniform':
+                    nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
+                elif weight_init == 'kaiming_normal':
+                    nn.init.kaiming_normal_(module.weight, nonlinearity='relu')
+                else:
+                    nn.init.xavier_uniform_(module.weight)
+                
+                # Bias initialization
+                if module.bias is not None:
+                    if bias_init == 'zeros':
+                        nn.init.zeros_(module.bias)
+                    elif bias_init == 'ones':
+                        nn.init.ones_(module.bias)
+                    elif bias_init == 'uniform':
+                        nn.init.uniform_(module.bias, -0.1, 0.1)
+                    else:
+                        nn.init.zeros_(module.bias)
+        
+        # ============================================
+        # Model Definitions
+        # ============================================
+        class MAEEncoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim, 
+                         layer1_units, layer2_units,
+                         activation, dropout, batch_norm):
+                super(MAEEncoder, self).__init__()
+                
+                # Input will be concatenated [x, mask], so input_dim = 2 * feature_dim
+                input_dim = 2 * feature_dim
+                
+                layers = []
+                
+                # Layer 1
+                layers.append(nn.Linear(input_dim, layer1_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer1_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                
+                # Layer 2
+                layers.append(nn.Linear(layer1_units, layer2_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer2_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                
+                # Layer 3 (output to latent)
+                layers.append(nn.Linear(layer2_units, latent_dim))
+                
+                self.encoder = nn.Sequential(*layers)
+            
+            def forward(self, x, m):
+                # Concatenate features and mask
+                x_in = torch.cat([x, m], dim=1)
+                return self.encoder(x_in)
+        
+        class MAEDecoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim,
+                         layer1_units, layer2_units,
+                         activation, dropout, batch_norm):
+                super(MAEDecoder, self).__init__()
+                
+                layers = []
+                
+                # Layer 1
+                layers.append(nn.Linear(latent_dim, layer1_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer1_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                
+                # Layer 2
+                layers.append(nn.Linear(layer1_units, layer2_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer2_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                
+                # Output layer
+                layers.append(nn.Linear(layer2_units, feature_dim))
+                
+                self.decoder = nn.Sequential(*layers)
+            
+            def forward(self, z):
+                return self.decoder(z)
+        
+        class MaskAwareAutoencoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim,
+                         encoder_config, decoder_config):
+                super(MaskAwareAutoencoder, self).__init__()
+                
+                self.feature_dim = feature_dim
+                self.latent_dim = latent_dim
+                
+                self.encoder = MAEEncoder(
+                    feature_dim, latent_dim,
+                    encoder_config['layer1_units'],
+                    encoder_config['layer2_units'],
+                    encoder_config['activation'],
+                    encoder_config['dropout'],
+                    encoder_config['batch_norm']
+                )
+                
+                self.decoder = MAEDecoder(
+                    feature_dim, latent_dim,
+                    decoder_config['layer1_units'],
+                    decoder_config['layer2_units'],
+                    decoder_config['activation'],
+                    decoder_config['dropout'],
+                    decoder_config['batch_norm']
+                )
+            
+            def forward(self, x, m):
+                z = self.encoder(x, m)
+                x_hat = self.decoder(z)
+                return x_hat, z
+        
+        # ============================================
+        # Build Model
+        # ============================================
+        try:
+            print("[model_builder] Building model architecture...")
+            
+            # Parse configurations
+            encoder_config = {
+                'layer1_units': args.encoder_layer1_units,
+                'layer2_units': args.encoder_layer2_units,
+                'activation': get_activation(args.encoder_activation),
+                'dropout': args.encoder_dropout,
+                'batch_norm': str_to_bool(args.encoder_batch_norm)
+            }
+            
+            decoder_config = {
+                'layer1_units': args.decoder_layer1_units,
+                'layer2_units': args.decoder_layer2_units,
+                'activation': get_activation(args.decoder_activation),
+                'dropout': args.decoder_dropout,
+                'batch_norm': str_to_bool(args.decoder_batch_norm)
+            }
+            
+            # Create model
+            model = MaskAwareAutoencoder(
+                feature_dim=args.feature_dim,
+                latent_dim=args.latent_dim,
+                encoder_config=encoder_config,
+                decoder_config=decoder_config
+            )
+            
+            print(f"[model_builder] Model created successfully")
+            print(f"[model_builder] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+            print(f"[model_builder] Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+            
+            # Initialize weights
+            print(f"[model_builder] Initializing weights with: {args.weight_init}")
+            print(f"[model_builder] Initializing biases with: {args.bias_init}")
+            model.apply(lambda m: init_weights(m, args.weight_init, args.bias_init))
+            
+            # ============================================
+            # Save Model
+            # ============================================
+            os.makedirs(args.model_file, exist_ok=True)
+            model_path = os.path.join(args.model_file, f"{args.model_name}.pth")
+            
+            # Prepare checkpoint
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'model_config': {
+                    'feature_dim': args.feature_dim,
+                    'latent_dim': args.latent_dim,
+                    'encoder': {
+                        'layer1_units': args.encoder_layer1_units,
+                        'layer2_units': args.encoder_layer2_units,
+                        'activation': args.encoder_activation,
+                        'dropout': args.encoder_dropout,
+                        'batch_norm': args.encoder_batch_norm
+                    },
+                    'decoder': {
+                        'layer1_units': args.decoder_layer1_units,
+                        'layer2_units': args.decoder_layer2_units,
+                        'activation': args.decoder_activation,
+                        'dropout': args.decoder_dropout,
+                        'batch_norm': args.decoder_batch_norm
+                    },
+                    'initialization': {
+                        'weight_init': args.weight_init,
+                        'bias_init': args.bias_init,
+                        'random_seed': args.random_seed
+                    }
+                },
+                'model_name': args.model_name,
+                'architecture': 'MaskAwareAutoencoder',
+                'version': '1.0'
+            }
+            
+            torch.save(checkpoint, model_path)
+            print(f"[model_builder] Model saved to: {model_path}")
+            
+            # Verify saved model
+            file_size = os.path.getsize(model_path)
+            print(f"[model_builder] Model file size: {file_size:,} bytes ({file_size/(1024*1024):.2f} MB)")
+            
+            # Test loading
+            loaded = torch.load(model_path, map_location='cpu')
+            print(f"[model_builder] Model verification: Successfully loaded checkpoint")
+            print(f"[model_builder] Checkpoint keys: {list(loaded.keys())}")
+            
+            # ============================================
+            # Save Configuration JSON
+            # ============================================
+            os.makedirs(args.model_config, exist_ok=True)
+            config_path = os.path.join(args.model_config, "model_config.json")
+            
+            config_dict = checkpoint['model_config'].copy()
+            config_dict['model_name'] = args.model_name
+            config_dict['total_parameters'] = sum(p.numel() for p in model.parameters())
+            config_dict['trainable_parameters'] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            
+            with open(config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            
+            print(f"[model_builder] Configuration saved to: {config_path}")
+            
+            # ============================================
+            # Print Model Summary
+            # ============================================
+            print("="*60)
+            print("MODEL SUMMARY")
+            print("="*60)
+            print(f"Model Name: {args.model_name}")
+            print(f"Architecture: Mask-Aware Autoencoder")
+            print(f"Encoder:")
+            print(f"  Input: {2 * args.feature_dim} (features + mask)")
+            print(f"  Layer 1: {args.encoder_layer1_units} units, {args.encoder_activation}")
+            print(f"  Layer 2: {args.encoder_layer2_units} units, {args.encoder_activation}")
+            print(f"  Output: {args.latent_dim} (latent)")
+            print(f"  Dropout: {args.encoder_dropout}")
+            print(f"  BatchNorm: {args.encoder_batch_norm}")
+            print(f"Decoder:")
+            print(f"  Input: {args.latent_dim} (latent)")
+            print(f"  Layer 1: {args.decoder_layer1_units} units, {args.decoder_activation}")
+            print(f"  Layer 2: {args.decoder_layer2_units} units, {args.decoder_activation}")
+            print(f"  Output: {args.feature_dim} (reconstructed)")
+            print(f"  Dropout: {args.decoder_dropout}")
+            print(f"  BatchNorm: {args.decoder_batch_norm}")
+            print(f"Total Parameters: {sum(p.numel() for p in model.parameters()):,}")
+            print("="*60)
+            
+            print("[model_builder] ✓ Model building completed successfully!")
+            
+        except Exception as e:
+            print(f"[model_builder] ERROR: Failed to build model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+    
+    args:
+      # Model architecture
+      - --feature_dim
+      - {inputValue: feature_dim}
+      - --latent_dim
+      - {inputValue: latent_dim}
+      
+      # Encoder config
+      - --encoder_layer1_units
+      - {inputValue: encoder_layer1_units}
+      - --encoder_layer2_units
+      - {inputValue: encoder_layer2_units}
+      - --encoder_activation
+      - {inputValue: encoder_activation}
+      - --encoder_dropout
+      - {inputValue: encoder_dropout}
+      - --encoder_batch_norm
+      - {inputValue: encoder_batch_norm}
+      
+      # Decoder config
+      - --decoder_layer1_units
+      - {inputValue: decoder_layer1_units}
+      - --decoder_layer2_units
+      - {inputValue: decoder_layer2_units}
+      - --decoder_activation
+      - {inputValue: decoder_activation}
+      - --decoder_dropout
+      - {inputValue: decoder_dropout}
+      - --decoder_batch_norm
+      - {inputValue: decoder_batch_norm}
+      
+      # Initialization
+      - --weight_init
+      - {inputValue: weight_init}
+      - --bias_init
+      - {inputValue: bias_init}
+      
+      # Metadata
+      - --model_name
+      - {inputValue: model_name}
+      - --random_seed
+      - {inputValue: random_seed}
+      
+      # Outputs
+      - --model_file
+      - {outputPath: model_file}
+      - --model_config
+      - {outputPath: model_config}
