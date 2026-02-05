@@ -1,0 +1,290 @@
+name: Dataset downloader and splitter from CDN (PyTorch)
+inputs:
+  - {name: tensor_values_cdn, type: String, optional: false}
+  - {name: masked_tensor_values_cdn, type: String, optional: false}
+  - {name: bearer_token, type: String, optional: true, default: ""}
+  - {name: test_size, type: Float, optional: true, default: "0.3"}
+  - {name: val_split, type: Float, optional: true, default: "0.5"}
+  - {name: random_state, type: Integer, optional: true, default: "42"}
+  - {name: batch_size, type: Integer, optional: true, default: "32"}
+  - {name: num_workers, type: Integer, optional: true, default: "0"}
+
+outputs:
+  - {name: train_dataset, type: Data}
+  - {name: val_dataset, type: Data}
+  - {name: test_dataset, type: Data}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:vtest4
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, tempfile, json, shutil, logging
+        import numpy as np
+        import pandas as pd
+        import torch
+        from torch.utils.data import Dataset, DataLoader, TensorDataset
+        import requests
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+        from sklearn.model_selection import train_test_split
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--tensor_values_cdn', required=True)
+        parser.add_argument('--masked_tensor_values_cdn', required=True)
+        parser.add_argument('--bearer_token', default="")
+        parser.add_argument('--test_size', type=float, default=0.3)
+        parser.add_argument('--val_split', type=float, default=0.5)
+        parser.add_argument('--random_state', type=int, default=42)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--train_dataset', required=True)
+        parser.add_argument('--val_dataset', required=True)
+        parser.add_argument('--test_dataset', required=True)
+        args = parser.parse_args()
+
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        logger = logging.getLogger("pytorch_dataset_downloader_splitter")
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retry = Retry(total=5, backoff_factor=1, status_forcelist=[500,502,503,504])
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Setup headers with bearer token if provided
+        headers = {}
+        if args.bearer_token and os.path.exists(args.bearer_token):
+            with open(args.bearer_token, "r") as f:
+                token = f.read().strip()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+
+        def candidate_urls(url):
+            if "$$$_" in url:
+                return [url, url.replace("$$$_", "$$_")]
+            return [url]
+
+        def download_with_fallback(url):
+            last_err = None
+            for u in candidate_urls(url):
+                try:
+                    logger.info("Trying download: %s", u)
+                    r = session.get(u, headers=headers, timeout=60)
+                    r.raise_for_status()
+                    fd, tmp = tempfile.mkstemp(suffix='.csv')
+                    os.close(fd)
+                    with open(tmp, "wb") as f:
+                        f.write(r.content)
+                    logger.info("Successfully downloaded to: %s", tmp)
+                    return tmp
+                except Exception as e:
+                    logger.warning("Download failed for %s: %s", u, str(e))
+                    last_err = e
+            raise last_err
+
+        def load_csv_data(file_path):
+            logger.info("Loading CSV from: %s", file_path)
+            df = pd.read_csv(file_path)
+            data = df.values
+            logger.info("Loaded data shape: %s", data.shape)
+            return data
+
+        def save_pytorch_dataset(dataset_tensors, output_path, dataset_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{dataset_name}.pt")
+            
+            # Save the tensors as a dictionary
+            torch.save({
+                'X': dataset_tensors[0],
+                'M': dataset_tensors[1]
+            }, save_path)
+            
+            logger.info("Saved %s to: %s", dataset_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "dataset_path": save_path,
+                    "shape_X": list(dataset_tensors[0].shape),
+                    "shape_M": list(dataset_tensors[1].shape)
+                }, f)
+            
+            return save_path
+
+        try:
+            # ============================================
+            # Download and Load Data
+            # ============================================
+            logger.info("Downloading tensor values...")
+            tensor_file = download_with_fallback(args.tensor_values_cdn)
+            X = load_csv_data(tensor_file)
+            os.remove(tensor_file)
+            
+            logger.info("Downloading masked tensor values...")
+            masked_file = download_with_fallback(args.masked_tensor_values_cdn)
+            M = load_csv_data(masked_file)
+            os.remove(masked_file)
+            
+            logger.info("X shape: %s, M shape: %s", X.shape, M.shape)
+            
+            # Normalize X
+            X_normalized = X.astype(np.float32)
+            M = M.astype(np.float32)
+            
+            # ============================================
+            # STEP 1: Split Data
+            # ============================================
+            logger.info("Splitting data with test_size=%s, val_split=%s", 
+                       args.test_size, args.val_split)
+            
+            X_train, X_temp, M_train, M_temp = train_test_split(
+                X_normalized, M, test_size=args.test_size, random_state=args.random_state
+            )
+            X_val, X_test, M_val, M_test = train_test_split(
+                X_temp, M_temp, test_size=args.val_split, random_state=args.random_state
+            )
+            
+            logger.info("Train: %s, Val: %s, Test: %s", 
+                       X_train.shape, X_val.shape, X_test.shape)
+            
+            # ============================================
+            # STEP 2: Convert to PyTorch Tensors
+            # ============================================
+            logger.info("Converting to PyTorch tensors...")
+            
+            X_train_tensor = torch.FloatTensor(X_train)
+            M_train_tensor = torch.FloatTensor(M_train)
+            X_val_tensor = torch.FloatTensor(X_val)
+            M_val_tensor = torch.FloatTensor(M_val)
+            X_test_tensor = torch.FloatTensor(X_test)
+            M_test_tensor = torch.FloatTensor(M_test)
+            
+            logger.info("✓ Converted to PyTorch tensors")
+            
+            # ============================================
+            # STEP 3: Create PyTorch Datasets
+            # ============================================
+            logger.info("Creating PyTorch TensorDatasets...")
+            
+            train_dataset = TensorDataset(X_train_tensor, M_train_tensor)
+            val_dataset = TensorDataset(X_val_tensor, M_val_tensor)
+            test_dataset = TensorDataset(X_test_tensor, M_test_tensor)
+            
+            # ============================================
+            # STEP 4: Create DataLoaders
+            # ============================================
+            logger.info("Creating DataLoaders with batch_size=%s, num_workers=%s", 
+                       args.batch_size, args.num_workers)
+            
+            # Training DataLoader with shuffling
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,           # Equivalent to .shuffle(1000)
+                num_workers=args.num_workers,
+                pin_memory=True,        # Faster GPU transfer
+                drop_last=False         # Keep last incomplete batch
+            )
+            
+            # Validation DataLoader (no shuffling)
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,          # Don't shuffle validation
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            # Test DataLoader (no shuffling)
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,          # Don't shuffle test
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            logger.info("✓ Created DataLoaders")
+            logger.info("  Train batches: %d", len(train_loader))
+            logger.info("  Val batches: %d", len(val_loader))
+            logger.info("  Test batches: %d", len(test_loader))
+            
+            # ============================================
+            # Save Datasets
+            # ============================================
+            logger.info("Saving PyTorch datasets...")
+            
+            train_path = save_pytorch_dataset(
+                (X_train_tensor, M_train_tensor), 
+                args.train_dataset, 
+                "train_dataset"
+            )
+            val_path = save_pytorch_dataset(
+                (X_val_tensor, M_val_tensor), 
+                args.val_dataset, 
+                "val_dataset"
+            )
+            test_path = save_pytorch_dataset(
+                (X_test_tensor, M_test_tensor), 
+                args.test_dataset, 
+                "test_dataset"
+            )
+            
+            logger.info("All datasets saved successfully!")
+            logger.info("Train: %s", train_path)
+            logger.info("Val: %s", val_path)
+            logger.info("Test: %s", test_path)
+            
+            # Save DataLoader info for reference
+            dataloader_info = {
+                "batch_size": args.batch_size,
+                "num_workers": args.num_workers,
+                "train_batches": len(train_loader),
+                "val_batches": len(val_loader),
+                "test_batches": len(test_loader),
+                "train_samples": len(train_dataset),
+                "val_samples": len(val_dataset),
+                "test_samples": len(test_dataset)
+            }
+            
+            info_path = os.path.join(args.train_dataset, "dataloader_info.json")
+            with open(info_path, "w") as f:
+                json.dump(dataloader_info, f, indent=2)
+            logger.info("DataLoader info saved to: %s", info_path)
+            
+        except Exception as e:
+            logger.exception("Fatal error in dataset processing: %s", str(e))
+            sys.exit(1)
+
+    args:
+      - --tensor_values_cdn
+      - {inputValue: tensor_values_cdn}
+      - --masked_tensor_values_cdn
+      - {inputValue: masked_tensor_values_cdn}
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --test_size
+      - {inputValue: test_size}
+      - --val_split
+      - {inputValue: val_split}
+      - --random_state
+      - {inputValue: random_state}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --train_dataset
+      - {outputPath: train_dataset}
+      - --val_dataset
+      - {outputPath: val_dataset}
+      - --test_dataset
+      - {outputPath: test_dataset}
