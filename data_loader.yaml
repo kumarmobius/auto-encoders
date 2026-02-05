@@ -2,7 +2,7 @@ name: Dataset downloader and splitter from CDN (PyTorch)
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
-  - {name: bearer_token, type: String, optional: true, default: ""}
+  - {name: bearer_token, type: string, optional: true, default: ""}
   - {name: test_size, type: Float, optional: true, default: "0.3"}
   - {name: val_split, type: Float, optional: true, default: "0.5"}
   - {name: random_state, type: Integer, optional: true, default: "42"}
@@ -91,7 +91,7 @@ implementation:
 
         def load_csv_data(file_path):
             logger.info("Loading CSV from: %s", file_path)
-            df = pd.read_csv(file_path)
+            df = pd.read_parquet(file_path,engine="pyarrow")
             data = df.values
             logger.info("Loaded data shape: %s", data.shape)
             return data
