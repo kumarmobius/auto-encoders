@@ -10,6 +10,8 @@ inputs:
   - {name: num_workers, type: Integer, optional: true, default: "0"}
 
 outputs:
+  - {name: tensor_values, type: Data}
+  - {name: masked_tensor_values, type: Data}
   - {name: train_dataset, type: Data}
   - {name: val_dataset, type: Data}
   - {name: test_dataset, type: Data}
@@ -44,6 +46,8 @@ implementation:
         parser.add_argument('--random_state', type=int, default=42)
         parser.add_argument('--batch_size', type=int, default=32)
         parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--tensor_values', required=True)
+        parser.add_argument('--masked_tensor_values', required=True)
         parser.add_argument('--train_dataset', required=True)
         parser.add_argument('--val_dataset', required=True)
         parser.add_argument('--test_dataset', required=True)
@@ -151,6 +155,23 @@ implementation:
             logger.error("All loading strategies failed!")
             raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
 
+        def save_tensor_output(tensor, output_path, data_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{data_name}.pt")
+            
+            torch.save(tensor, save_path)
+            logger.info("Saved %s to: %s", data_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "tensor_path": save_path,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype)
+                }, f)
+            
+            return save_path
+
         def save_pytorch_dataset(dataset_tensors, output_path, dataset_name):
             os.makedirs(output_path, exist_ok=True)
             save_path = os.path.join(output_path, f"{dataset_name}.pt")
@@ -189,9 +210,34 @@ implementation:
             
             logger.info("X shape: %s, M shape: %s", X.shape, M.shape)
             
-            # Normalize X
+            # Normalize and convert to float32
             X_normalized = X.astype(np.float32)
             M = M.astype(np.float32)
+            
+            # Convert to PyTorch tensors for saving
+            X_tensor = torch.FloatTensor(X_normalized)
+            M_tensor = torch.FloatTensor(M)
+            
+            # ============================================
+            # Save Full Tensors as Outputs
+            # ============================================
+            logger.info("Saving full tensor outputs...")
+            
+            tensor_values_path = save_tensor_output(
+                X_tensor,
+                args.tensor_values,
+                "tensor_values"
+            )
+            
+            masked_tensor_values_path = save_tensor_output(
+                M_tensor,
+                args.masked_tensor_values,
+                "masked_tensor_values"
+            )
+            
+            logger.info("✓ Saved full tensors")
+            logger.info("  Tensor values: %s", tensor_values_path)
+            logger.info("  Masked tensor values: %s", masked_tensor_values_path)
             
             # ============================================
             # STEP 1: Split Data
@@ -242,17 +288,17 @@ implementation:
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=args.batch_size,
-                shuffle=True,           # Equivalent to .shuffle(1000)
+                shuffle=True,
                 num_workers=args.num_workers,
-                pin_memory=True,        # Faster GPU transfer
-                drop_last=False         # Keep last incomplete batch
+                pin_memory=True,
+                drop_last=False
             )
             
             # Validation DataLoader (no shuffling)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=args.batch_size,
-                shuffle=False,          # Don't shuffle validation
+                shuffle=False,
                 num_workers=args.num_workers,
                 pin_memory=True,
                 drop_last=False
@@ -262,7 +308,7 @@ implementation:
             test_loader = DataLoader(
                 test_dataset,
                 batch_size=args.batch_size,
-                shuffle=False,          # Don't shuffle test
+                shuffle=False,
                 num_workers=args.num_workers,
                 pin_memory=True,
                 drop_last=False
@@ -274,7 +320,7 @@ implementation:
             logger.info("  Test batches: %d", len(test_loader))
             
             # ============================================
-            # Save Datasets
+            # Save Split Datasets
             # ============================================
             logger.info("Saving PyTorch datasets...")
             
@@ -308,7 +354,9 @@ implementation:
                 "test_batches": len(test_loader),
                 "train_samples": len(train_dataset),
                 "val_samples": len(val_dataset),
-                "test_samples": len(test_dataset)
+                "test_samples": len(test_dataset),
+                "full_tensor_shape": list(X_tensor.shape),
+                "full_masked_tensor_shape": list(M_tensor.shape)
             }
             
             info_path = os.path.join(args.train_dataset, "dataloader_info.json")
@@ -337,6 +385,10 @@ implementation:
       - {inputValue: batch_size}
       - --num_workers
       - {inputValue: num_workers}
+      - --tensor_values
+      - {outputPath: tensor_values}
+      - --masked_tensor_values
+      - {outputPath: masked_tensor_values}
       - --train_dataset
       - {outputPath: train_dataset}
       - --val_dataset
