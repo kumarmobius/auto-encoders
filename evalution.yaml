@@ -1,11 +1,10 @@
-name: Evaluate Mask Aware Autoencoder v1
+name: Evaluate Mask Aware Autoencoder v1.2
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
   - {name: test_dataset, type: Data, description: "Test dataset (.pt file)"}
   - {name: batch_size, type: Integer, description: "Batch size for evaluation", default: "32"}
   - {name: num_workers, type: Integer, description: "Number of data loader workers", default: "0"}
-  - {name: device, type: String, description: "Device to evaluate on (cuda, cpu, auto)", default: "auto"}
   - {name: loss_eps, type: Float, description: "Epsilon for numerical stability in loss", default: "0.000001"}
   - {name: compute_per_sample_metrics, type: String, description: "Compute per-sample statistics (true/false)", default: "true"}
   - {name: save_reconstructions, type: String, description: "Save reconstruction samples (true/false)", default: "true"}
@@ -15,6 +14,7 @@ inputs:
 outputs:
   - {name: evaluation_results, type: Data, description: "Evaluation metrics and results"}
   - {name: reconstruction_samples, type: Data, description: "Reconstruction samples"}
+  - {name: schema_json, type: Data, description: "Schema JSON with scaled metrics"}
 
 implementation:
   container:
@@ -28,6 +28,7 @@ implementation:
         import os
         import sys
         import json
+        import time
         import traceback
         from pathlib import Path
         import numpy as np
@@ -41,7 +42,6 @@ implementation:
         parser.add_argument("--test_dataset", type=str, required=True)
         parser.add_argument("--batch_size", type=int, required=True)
         parser.add_argument("--num_workers", type=int, required=True)
-        parser.add_argument("--device", type=str, required=True)
         parser.add_argument("--loss_eps", type=float, required=True)
         parser.add_argument("--compute_per_sample_metrics", type=str, required=True)
         parser.add_argument("--save_reconstructions", type=str, required=True)
@@ -49,6 +49,7 @@ implementation:
         parser.add_argument("--random_seed", type=int, required=True)
         parser.add_argument("--evaluation_results", type=str, required=True)
         parser.add_argument("--reconstruction_samples", type=str, required=True)
+        parser.add_argument("--schema_json", type=str, required=True)
         args = parser.parse_args()
         
         print("[evaluator] ============================================")
@@ -58,18 +59,17 @@ implementation:
         def str_to_bool(s):
             return s.lower() in ['true', '1', 'yes']
         
-        def get_device(device_str):
-            if device_str == 'auto':
-                return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            return torch.device(device_str)
+        # Auto-detect device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"[evaluator] Device: {device} (auto-detected)")
+        if device.type == 'cuda':
+            print(f"[evaluator] GPU: {torch.cuda.get_device_name(0)}")
         
         torch.manual_seed(args.random_seed)
         np.random.seed(args.random_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.random_seed)
         
-        device = get_device(args.device)
-        print(f"[evaluator] Device: {device}")
         print(f"[evaluator] Random seed: {args.random_seed}")
         
         def get_activation(name):
@@ -323,6 +323,40 @@ implementation:
             sys.exit(1)
         
         try:
+            print(f"[evaluator] Saving schema JSON...")
+            os.makedirs(args.schema_json, exist_ok=True)
+            
+            # Get current epoch timestamp
+            current_timestamp = int(time.time())
+            
+            schema_data = {
+                'timestamp': current_timestamp,
+                'mae': float(overall_metrics['masked_mae'] * 100),
+                'mse': float(overall_metrics['masked_mse'] * 100),
+                'rmse': float(overall_metrics['masked_rmse'] * 100)
+            }
+            
+            schema_path = os.path.join(args.schema_json, 'schema.json')
+            with open(schema_path, 'w') as f:
+                json.dump(schema_data, f, indent=2)
+            print(f"[evaluator] Schema JSON saved to: {schema_path}")
+            print(f"[evaluator]   Timestamp: {current_timestamp}")
+            print(f"[evaluator]   MAE (×100): {schema_data['mae']:.2f}")
+            print(f"[evaluator]   MSE (×100): {schema_data['mse']:.2f}")
+            print(f"[evaluator]   RMSE (×100): {schema_data['rmse']:.2f}")
+            
+            # Save metadata
+            with open(args.schema_json + ".meta.json", "w") as f:
+                json.dump({
+                    "schema_path": schema_path,
+                    "timestamp": current_timestamp
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[evaluator] ERROR: Failed to save schema JSON: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        try:
             print(f"[evaluator] Saving evaluation results...")
             os.makedirs(args.evaluation_results, exist_ok=True)
             results_path = os.path.join(args.evaluation_results, 'evaluation_results.json')
@@ -375,6 +409,7 @@ implementation:
         print(f"[evaluator] Evaluation Complete!")
         print(f"[evaluator] ============================================")
         print(f"[evaluator] Results: {results_path}")
+        print(f"[evaluator] Schema JSON: {schema_path}")
         print(f"[evaluator] Masked MSE: {overall_metrics['masked_mse']:.6f}")
         print(f"[evaluator] Masked MAE: {overall_metrics['masked_mae']:.6f}")
         print(f"[evaluator] Masked RMSE: {overall_metrics['masked_rmse']:.6f}")
@@ -389,8 +424,6 @@ implementation:
       - {inputValue: batch_size}
       - --num_workers
       - {inputValue: num_workers}
-      - --device
-      - {inputValue: device}
       - --loss_eps
       - {inputValue: loss_eps}
       - --compute_per_sample_metrics
@@ -405,3 +438,5 @@ implementation:
       - {outputPath: evaluation_results}
       - --reconstruction_samples
       - {outputPath: reconstruction_samples}
+      - --schema_json
+      - {outputPath: schema_json}
