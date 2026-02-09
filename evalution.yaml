@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.3
+name: Evaluate Mask Aware Autoencoder v1.4
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -324,7 +324,6 @@ implementation:
         
         try:
             print(f"[evaluator] Saving schema JSON...")
-            os.makedirs(args.schema_json, exist_ok=True)
             
             # Get current epoch timestamp
             current_timestamp = int(time.time())
@@ -336,21 +335,15 @@ implementation:
                 'rmse': float(overall_metrics['masked_rmse'] * 100)
             }
             
-            schema_path = os.path.join(args.schema_json, 'schema.json')
-            with open(schema_path, 'w') as f:
+            # Write JSON string directly to the output file
+            with open(args.schema_json, 'w') as f:
                 json.dump(schema_data, f, indent=2)
-            print(f"[evaluator] Schema JSON saved to: {schema_path}")
+            
+            print(f"[evaluator] Schema JSON saved to: {args.schema_json}")
             print(f"[evaluator]   Timestamp: {current_timestamp}")
             print(f"[evaluator]   MAE (×100): {schema_data['mae']:.2f}")
             print(f"[evaluator]   MSE (×100): {schema_data['mse']:.2f}")
             print(f"[evaluator]   RMSE (×100): {schema_data['rmse']:.2f}")
-            
-            # Save metadata
-            with open(args.schema_json + ".meta.json", "w") as f:
-                json.dump({
-                    "schema_path": schema_path,
-                    "timestamp": current_timestamp
-                }, f, indent=2)
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save schema JSON: {e}")
             traceback.print_exc()
