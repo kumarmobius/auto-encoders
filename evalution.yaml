@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.5
+name: Evaluate Mask Aware Autoencoder v1.6
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -58,7 +58,10 @@ implementation:
         
         def str_to_bool(s):
             return s.lower() in ['true', '1', 'yes']
-        
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
         # Auto-detect device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[evaluator] Device: {device} (auto-detected)")
@@ -338,10 +341,11 @@ implementation:
                 'rmse': float(overall_metrics['masked_rmse'] * 100)
             }
             
-            # Save to schema.json file inside the directory
-            schema_path = os.path.join(args.schema_json, 'schema.json')
-            with open(schema_path, 'w') as f:
-                json.dump(schema_data, f, indent=2)
+
+                
+            ensure_dir_for(args.schema_json)
+            with open(args.schema_json, "w") as f:
+              json.dump(schema_data, f, indent=2)
             
             print(f"[evaluator] Schema JSON saved to: {schema_path}")
             print(f"[evaluator]   Timestamp: {current_timestamp}")
