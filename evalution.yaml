@@ -334,9 +334,9 @@ implementation:
             
             schema_data = {
                 'timestamp': current_timestamp,
-                'mae': float(overall_metrics['masked_mae'] * 100),
-                'mse': float(overall_metrics['masked_mse'] * 100),
-                'rmse': float(overall_metrics['masked_rmse'] * 100)
+                'mae': float(overall_metrics['masked_mae']),
+                'mse': float(overall_metrics['masked_mse']),
+                'rmse': float(overall_metrics['masked_rmse'])
             }
             
             # Ensure parent directory exists
