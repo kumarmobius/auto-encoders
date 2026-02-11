@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.6
+name: Evaluate Mask Aware Autoencoder v1.7
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -329,7 +329,7 @@ implementation:
             print(f"[evaluator] Saving schema JSON...")
             
             # Create schema_json directory if it doesn't exist
-            os.makedirs(args.schema_json, exist_ok=True)
+            # os.makedirs(args.schema_json, exist_ok=True)
             
             # Get current epoch timestamp
             current_timestamp = int(time.time())
