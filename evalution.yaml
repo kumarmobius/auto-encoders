@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.9
+name: Evaluate Mask Aware Autoencoder v1.9.1
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -348,9 +348,9 @@ implementation:
             
             print(f"[evaluator] Schema JSON saved to: {args.schema_json}")
             print(f"[evaluator]   Timestamp: {current_timestamp}")
-            print(f"[evaluator]   MAE (×100): {schema_data['mae']:.2f}")
-            print(f"[evaluator]   MSE (×100): {schema_data['mse']:.2f}")
-            print(f"[evaluator]   RMSE (×100): {schema_data['rmse']:.2f}")
+            print(f"[evaluator]   MAE: {schema_data['mae']:.2f}")
+            print(f"[evaluator]   MSE: {schema_data['mse']:.2f}")
+            print(f"[evaluator]   RMSE: {schema_data['rmse']:.2f}")
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save schema JSON: {e}")
             traceback.print_exc()
