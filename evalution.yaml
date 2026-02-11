@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.7
+name: Evaluate Mask Aware Autoencoder v1.9
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -35,7 +35,6 @@ implementation:
         import torch
         import torch.nn as nn
         from torch.utils.data import DataLoader, TensorDataset
-        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
         
         parser = argparse.ArgumentParser(description="Evaluate Mask-Aware Autoencoder")
         parser.add_argument("--trained_model", type=str, required=True)
@@ -58,10 +57,12 @@ implementation:
         
         def str_to_bool(s):
             return s.lower() in ['true', '1', 'yes']
+        
         def ensure_dir_for(p):
-            d=os.path.dirname(p)
+            d = os.path.dirname(p)
             if d and not os.path.exists(d):
                 os.makedirs(d, exist_ok=True)
+        
         # Auto-detect device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[evaluator] Device: {device} (auto-detected)")
@@ -311,7 +312,7 @@ implementation:
             per_sample_stats = None
             if str_to_bool(args.compute_per_sample_metrics):
                 print(f"[evaluator] Computing per-sample statistics...")
-                per_sample_stats = compute_per_sample_metrics(all_x_true, all_x_hat, all_masks, args.loss_eps)
+                per_sample_stats = compute_per_sample_metrics(all_x_hat, all_x_true, all_masks, args.loss_eps)
                 print(f"[evaluator] ============================================")
                 print(f"[evaluator] Per-Sample Statistics")
                 print(f"[evaluator] ============================================")
@@ -328,9 +329,6 @@ implementation:
         try:
             print(f"[evaluator] Saving schema JSON...")
             
-            # Create schema_json directory if it doesn't exist
-            # os.makedirs(args.schema_json, exist_ok=True)
-            
             # Get current epoch timestamp
             current_timestamp = int(time.time())
             
@@ -341,13 +339,14 @@ implementation:
                 'rmse': float(overall_metrics['masked_rmse'] * 100)
             }
             
-
-                
+            # Ensure parent directory exists
             ensure_dir_for(args.schema_json)
-            with open(args.schema_json, "w") as f:
-              json.dump(schema_data, f, indent=2)
             
-            print(f"[evaluator] Schema JSON saved to: {schema_path}")
+            # Write JSON directly to the schema_json path
+            with open(args.schema_json, "w") as f:
+                json.dump(schema_data, f, indent=2)
+            
+            print(f"[evaluator] Schema JSON saved to: {args.schema_json}")
             print(f"[evaluator]   Timestamp: {current_timestamp}")
             print(f"[evaluator]   MAE (×100): {schema_data['mae']:.2f}")
             print(f"[evaluator]   MSE (×100): {schema_data['mse']:.2f}")
@@ -359,8 +358,8 @@ implementation:
         
         try:
             print(f"[evaluator] Saving evaluation results...")
-            os.makedirs(args.evaluation_results, exist_ok=True)
-            results_path = os.path.join(args.evaluation_results, 'evaluation_results.json')
+            # Ensure parent directory exists
+            ensure_dir_for(args.evaluation_results)
             
             results = {
                 'overall_metrics': overall_metrics,
@@ -379,9 +378,10 @@ implementation:
                 }
             }
             
-            with open(results_path, 'w') as f:
+            # Write directly to the evaluation_results path
+            with open(args.evaluation_results, 'w') as f:
                 json.dump(results, f, indent=2)
-            print(f"[evaluator] Evaluation results saved: {results_path}")
+            print(f"[evaluator] Evaluation results saved: {args.evaluation_results}")
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save evaluation results: {e}")
             traceback.print_exc()
@@ -390,17 +390,19 @@ implementation:
         try:
             if str_to_bool(args.save_reconstructions):
                 print(f"[evaluator] Saving reconstruction samples...")
-                os.makedirs(args.reconstruction_samples, exist_ok=True)
-                num_samples = min(args.num_reconstruction_samples, len(all_x_true))
-                samples_path = os.path.join(args.reconstruction_samples, 'reconstruction_samples.pt')
+                # Ensure parent directory exists
+                ensure_dir_for(args.reconstruction_samples)
                 
+                num_samples = min(args.num_reconstruction_samples, len(all_x_true))
+                
+                # Write directly to the reconstruction_samples path
                 torch.save({
                     'x_true': all_x_true[:num_samples],
                     'x_reconstructed': all_x_hat[:num_samples],
                     'masks': all_masks[:num_samples],
                     'latents': all_latents[:num_samples]
-                }, samples_path)
-                print(f"[evaluator] Saved {num_samples} reconstruction samples: {samples_path}")
+                }, args.reconstruction_samples)
+                print(f"[evaluator] Saved {num_samples} reconstruction samples: {args.reconstruction_samples}")
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save reconstruction samples: {e}")
             traceback.print_exc()
@@ -409,8 +411,8 @@ implementation:
         print(f"[evaluator] ============================================")
         print(f"[evaluator] Evaluation Complete!")
         print(f"[evaluator] ============================================")
-        print(f"[evaluator] Results: {results_path}")
-        print(f"[evaluator] Schema JSON: {schema_path}")
+        print(f"[evaluator] Results: {args.evaluation_results}")
+        print(f"[evaluator] Schema JSON: {args.schema_json}")
         print(f"[evaluator] Masked MSE: {overall_metrics['masked_mse']:.6f}")
         print(f"[evaluator] Masked MAE: {overall_metrics['masked_mae']:.6f}")
         print(f"[evaluator] Masked RMSE: {overall_metrics['masked_rmse']:.6f}")
