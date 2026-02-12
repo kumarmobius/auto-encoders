@@ -29,7 +29,7 @@ inputs:
 
 outputs:
   - {name: model_file, type: Model, description: "Built PyTorch model saved as .pth file"}
-  - {name: model_config, type: String, description: "Model configuration JSON file"}
+  - {name: model_config, type: Data, description: "Model configuration JSON file"}
 
 implementation:
   container:
