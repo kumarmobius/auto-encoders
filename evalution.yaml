@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v1.9.1
+name: Evaluate Mask Aware Autoencoder v2
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -18,7 +18,7 @@ outputs:
 
 implementation:
   container:
-    image: kushagra4761/nesy-factory-gpu:t2.6v4
+    image: gurpreetgandhi/nesy-factory:v1
     command:
       - python3
       - -u
