@@ -1,0 +1,212 @@
+name: MAE Outputs CDN Uploader v1
+description: Upload latent representations and reconstructed matrix parquet files to CDN and return individual CDN URLs
+inputs:
+  - {name: latent_representations, type: Data, description: "Latent representations parquet directory from inference brick"}
+  - {name: reconstructed_matrix, type: Data, description: "Reconstructed matrix parquet directory from inference brick"}
+  - {name: bearer_token, type: string, description: "Path to a file containing bearer token (will be read)"}
+  - {name: domain, type: String, description: "Domain root for upload endpoint, e.g. https://api.example.com"}
+  - {name: get_cdn, type: String, description: "CDN base URL to prefix returned relative cdnUrl"}
+
+outputs:
+  - {name: latent_cdn_url, type: String, description: "CDN URL for uploaded latent representations parquet file"}
+  - {name: reconstructed_cdn_url, type: String, description: "CDN URL for uploaded reconstructed matrix parquet file"}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import subprocess
+        import json
+        import os
+        import uuid
+        import tempfile
+        import shutil
+        import sys
+        import traceback
+
+        parser = argparse.ArgumentParser(description="Upload MAE output parquet files to CDN")
+        parser.add_argument("--latent_representations", type=str, required=True)
+        parser.add_argument("--reconstructed_matrix", type=str, required=True)
+        parser.add_argument("--bearer_token", type=str, required=True)
+        parser.add_argument("--domain", type=str, required=True)
+        parser.add_argument("--get_cdn", type=str, required=True)
+        parser.add_argument("--latent_cdn_url", type=str, required=True)
+        parser.add_argument("--reconstructed_cdn_url", type=str, required=True)
+        args = parser.parse_args()
+
+        print("[uploader] ============================================")
+        print("[uploader] MAE Outputs CDN Uploader")
+        print("[uploader] ============================================")
+
+        def ensure_parent_dir(path):
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+        def atomic_write_text(path, text):
+            ensure_parent_dir(path)
+            fd, tmp = tempfile.mkstemp(prefix="tmp_txt_")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                raise
+
+        def encode_special_chars(text):
+            return (
+                text.replace("$", "%24")
+                    .replace("(", "%28")
+                    .replace(")", "%29")
+                    .replace("[", "%5B")
+                    .replace("]", "%5D")
+                    .replace("{", "%7B")
+                    .replace("}", "%7D")
+            )
+
+        with open(args.bearer_token, "r", encoding="utf-8") as f:
+            bearer_token = f.read().strip()
+
+        upload_url = (
+            f"{args.domain.rstrip('/')}"
+            "/mobius-content-service/v1.0/content/upload"
+            "?filePathAccess=private&filePath=%2Fbottle%2Flimka%2Fsoda%2F"
+        )
+
+        def run_upload(path):
+            cmd = [
+                "curl",
+                "--location", upload_url,
+                "--header", f"Authorization: Bearer {bearer_token}",
+                "--form", f"file=@{path}",
+                "--fail",
+                "--show-error"
+            ]
+            p = subprocess.run(cmd, capture_output=True)
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.decode())
+            return json.loads(p.stdout.decode())
+
+        def prepare_file(path):
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Path not found: {path}")
+
+            if os.path.isfile(path):
+                name = os.path.basename(path)
+                safe = encode_special_chars(name)
+                if safe != name:
+                    tmp = os.path.join(tempfile.gettempdir(), safe)
+                    shutil.copy2(path, tmp)
+                    return tmp, tmp
+                return path, None
+
+            safe = encode_special_chars(os.path.basename(path))
+            zip_path = os.path.join(
+                tempfile.gettempdir(),
+                f"{safe}_{uuid.uuid4().hex}.zip"
+            )
+            shutil.make_archive(zip_path[:-4], "zip", path)
+            return zip_path, zip_path
+
+        def upload_and_get_url(path, label):
+            print(f"[uploader] Preparing {label} from: {path}")
+            prepared, tmp = prepare_file(path)
+            print(f"[uploader] Uploading {label}: {prepared}")
+            resp = run_upload(prepared)
+            rel = resp.get("cdnUrl")
+            if not rel:
+                raise ValueError(f"cdnUrl missing in upload response for {label}")
+            full = f"{args.get_cdn.rstrip('/')}{rel}"
+            full_encoded = encode_special_chars(full)
+            print(f"[uploader] {label} CDN URL: {full_encoded}")
+            return full_encoded, tmp
+
+        def find_parquet_file(input_path, label):
+            from pathlib import Path
+            parquet_files = list(Path(input_path).glob("*.parquet"))
+            if not parquet_files:
+                raise FileNotFoundError(f"No .parquet file found in {input_path} for {label}")
+            if len(parquet_files) > 1:
+                print(f"[uploader] Warning: Multiple parquet files found in {input_path}, using first: {parquet_files[0]}")
+            print(f"[uploader] Found {label} parquet: {parquet_files[0]}")
+            file_size_mb = os.path.getsize(parquet_files[0]) / (1024 * 1024)
+            print(f"[uploader] File size: {file_size_mb:.2f} MB")
+            return str(parquet_files[0])
+
+        tmp_files = []
+
+        try:
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Step 1: Locating parquet files")
+            print(f"[uploader] ============================================")
+
+            latent_parquet = find_parquet_file(args.latent_representations, "latent_representations")
+            recon_parquet = find_parquet_file(args.reconstructed_matrix, "reconstructed_matrix")
+
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Step 2: Uploading latent representations")
+            print(f"[uploader] ============================================")
+
+            latent_url, t1 = upload_and_get_url(latent_parquet, "latent_representations")
+            if t1:
+                tmp_files.append(t1)
+
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Step 3: Uploading reconstructed matrix")
+            print(f"[uploader] ============================================")
+
+            recon_url, t2 = upload_and_get_url(recon_parquet, "reconstructed_matrix")
+            if t2:
+                tmp_files.append(t2)
+
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Step 4: Writing output CDN URLs")
+            print(f"[uploader] ============================================")
+
+            atomic_write_text(args.latent_cdn_url, latent_url)
+            print(f"[uploader] Latent CDN URL written to: {args.latent_cdn_url}")
+
+            atomic_write_text(args.reconstructed_cdn_url, recon_url)
+            print(f"[uploader] Reconstructed CDN URL written to: {args.reconstructed_cdn_url}")
+
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Upload Complete!")
+            print(f"[uploader] ============================================")
+            print(f"[uploader] Latent CDN URL:       {latent_url}")
+            print(f"[uploader] Reconstructed CDN URL: {recon_url}")
+            print(f"[uploader] ============================================")
+
+        except Exception:
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            for f in tmp_files:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+    args:
+      - --latent_representations
+      - {inputPath: latent_representations}
+      - --reconstructed_matrix
+      - {inputPath: reconstructed_matrix}
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --domain
+      - {inputValue: domain}
+      - --get_cdn
+      - {inputValue: get_cdn}
+      - --latent_cdn_url
+      - {outputPath: latent_cdn_url}
+      - --reconstructed_cdn_url
+      - {outputPath: reconstructed_cdn_url}
