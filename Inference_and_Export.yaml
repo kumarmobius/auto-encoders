@@ -1,0 +1,367 @@
+name: Mask Aware Autoencoder Inference and Export V1
+description: Run inference on Mask-Aware Autoencoder model with preprocessed tensor and mask inputs, export latent representations and reconstructed matrix as parquet files
+inputs:
+  - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
+  - {name: tensor_values, type: Data, description: "Preprocessed tensor values (.pt file from preprocessing brick)"}
+  - {name: masked_tensor_values, type: Data, description: "Preprocessed masked tensor values (.pt file from preprocessing brick)"}
+  - {name: batch_size, type: Integer, description: "Batch size for inference", default: "32"}
+  - {name: num_workers, type: Integer, description: "Number of data loader workers", default: "0"}
+  - {name: loss_eps, type: Float, description: "Epsilon for numerical stability", default: "0.000001"}
+  - {name: random_seed, type: Integer, description: "Random seed for reproducibility", default: "42"}
+
+outputs:
+  - {name: latent_representations, type: Data, description: "Latent dimension representations saved as parquet"}
+  - {name: reconstructed_matrix, type: Data, description: "Reconstructed feature matrix saved as parquet"}
+
+implementation:
+  container:
+    image: kushagra4761/nesy-factory-gpu:t2.6v4
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import time
+        import traceback
+        from pathlib import Path
+        import numpy as np
+        import pandas as pd
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+
+        parser = argparse.ArgumentParser(description="MAE Inference and Export")
+        parser.add_argument("--trained_model", type=str, required=True)
+        parser.add_argument("--tensor_values", type=str, required=True)
+        parser.add_argument("--masked_tensor_values", type=str, required=True)
+        parser.add_argument("--batch_size", type=int, required=True)
+        parser.add_argument("--num_workers", type=int, required=True)
+        parser.add_argument("--loss_eps", type=float, required=True)
+        parser.add_argument("--random_seed", type=int, required=True)
+        parser.add_argument("--latent_representations", type=str, required=True)
+        parser.add_argument("--reconstructed_matrix", type=str, required=True)
+        args = parser.parse_args()
+
+        print("[inference] ============================================")
+        print("[inference] Mask-Aware Autoencoder Inference and Export")
+        print("[inference] ============================================")
+
+        def str_to_bool(s):
+            return s.lower() in ["true", "1", "yes"]
+
+        def ensure_dir(p):
+            os.makedirs(p, exist_ok=True)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[inference] Device: {device}")
+        if device.type == "cuda":
+            print(f"[inference] GPU: {torch.cuda.get_device_name(0)}")
+
+        torch.manual_seed(args.random_seed)
+        np.random.seed(args.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.random_seed)
+
+        def get_activation(name):
+            activations = {
+                "relu": nn.ReLU(),
+                "tanh": nn.Tanh(),
+                "elu": nn.ELU(),
+                "leaky_relu": nn.LeakyReLU(),
+                "sigmoid": nn.Sigmoid(),
+                "none": None
+            }
+            return activations.get(name.lower(), nn.ReLU())
+
+        class MAEEncoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim, layer1_units, layer2_units, activation, dropout, batch_norm):
+                super(MAEEncoder, self).__init__()
+                input_dim = 2 * feature_dim
+                layers = []
+                layers.append(nn.Linear(input_dim, layer1_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer1_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                layers.append(nn.Linear(layer1_units, layer2_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer2_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                layers.append(nn.Linear(layer2_units, latent_dim))
+                self.encoder = nn.Sequential(*layers)
+
+            def forward(self, x, m):
+                x_in = torch.cat([x, m], dim=1)
+                return self.encoder(x_in)
+
+        class MAEDecoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim, layer1_units, layer2_units, activation, dropout, batch_norm):
+                super(MAEDecoder, self).__init__()
+                layers = []
+                layers.append(nn.Linear(latent_dim, layer1_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer1_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                layers.append(nn.Linear(layer1_units, layer2_units))
+                if batch_norm:
+                    layers.append(nn.BatchNorm1d(layer2_units))
+                if activation is not None:
+                    layers.append(activation)
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+                layers.append(nn.Linear(layer2_units, feature_dim))
+                self.decoder = nn.Sequential(*layers)
+
+            def forward(self, z):
+                return self.decoder(z)
+
+        class MaskAwareAutoencoder(nn.Module):
+            def __init__(self, feature_dim, latent_dim, encoder_config, decoder_config):
+                super(MaskAwareAutoencoder, self).__init__()
+                self.feature_dim = feature_dim
+                self.latent_dim = latent_dim
+                self.encoder = MAEEncoder(feature_dim, latent_dim, encoder_config["layer1_units"], encoder_config["layer2_units"], encoder_config["activation"], encoder_config["dropout"], encoder_config["batch_norm"])
+                self.decoder = MAEDecoder(feature_dim, latent_dim, decoder_config["layer1_units"], decoder_config["layer2_units"], decoder_config["activation"], decoder_config["dropout"], decoder_config["batch_norm"])
+
+            def forward(self, x, m):
+                z = self.encoder(x, m)
+                x_hat = self.decoder(z)
+                return x_hat, z
+
+        def load_pt_tensor(input_path, expected_key):
+            pt_files = list(Path(input_path).glob("*.pt"))
+            if not pt_files:
+                raise FileNotFoundError(f"No .pt file found in {input_path}")
+            pt_path = pt_files[0]
+            print(f"[inference] Loading .pt file: {pt_path}")
+            loaded = torch.load(pt_path, map_location="cpu", weights_only=False)
+            if isinstance(loaded, torch.Tensor):
+                tensor = loaded
+            elif isinstance(loaded, dict):
+                if expected_key in loaded:
+                    tensor = loaded[expected_key]
+                else:
+                    tensor = list(loaded.values())[0]
+                    print(f"[inference] Key '{expected_key}' not found, using first key: {list(loaded.keys())[0]}")
+            else:
+                tensor = torch.FloatTensor(np.array(loaded))
+            if not isinstance(tensor, torch.Tensor):
+                tensor = torch.FloatTensor(np.array(tensor))
+            print(f"[inference] Loaded tensor shape: {tensor.shape}, dtype: {tensor.dtype}")
+            return tensor
+
+        try:
+            print(f"[inference] Loading model from: {args.trained_model}")
+            model_files = list(Path(args.trained_model).glob("*.pth"))
+            if not model_files:
+                raise FileNotFoundError(f"No .pth file found in {args.trained_model}")
+            model_path = model_files[0]
+            print(f"[inference] Model file: {model_path}")
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+            config = checkpoint["model_config"]
+            print(f"[inference] Feature dim: {config['feature_dim']}")
+            print(f"[inference] Latent dim:  {config['latent_dim']}")
+            encoder_config = {
+                "layer1_units": config["encoder"]["layer1_units"],
+                "layer2_units": config["encoder"]["layer2_units"],
+                "activation": get_activation(config["encoder"]["activation"]),
+                "dropout": config["encoder"]["dropout"],
+                "batch_norm": str_to_bool(str(config["encoder"]["batch_norm"]))
+            }
+            decoder_config = {
+                "layer1_units": config["decoder"]["layer1_units"],
+                "layer2_units": config["decoder"]["layer2_units"],
+                "activation": get_activation(config["decoder"]["activation"]),
+                "dropout": config["decoder"]["dropout"],
+                "batch_norm": str_to_bool(str(config["decoder"]["batch_norm"]))
+            }
+            model = MaskAwareAutoencoder(feature_dim=config["feature_dim"], latent_dim=config["latent_dim"], encoder_config=encoder_config, decoder_config=decoder_config)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model = model.to(device)
+            model.eval()
+            print(f"[inference] Model loaded. Parameters: {sum(p.numel() for p in model.parameters()):,}")
+        except Exception as e:
+            print(f"[inference] ERROR: Failed to load model: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        try:
+            print(f"[inference] Loading tensor_values from: {args.tensor_values}")
+            X_tensor = load_pt_tensor(args.tensor_values, "tensor_values")
+
+            print(f"[inference] Loading masked_tensor_values from: {args.masked_tensor_values}")
+            M_tensor = load_pt_tensor(args.masked_tensor_values, "masked_tensor_values")
+
+            print(f"[inference] X shape: {X_tensor.shape}, M shape: {M_tensor.shape}")
+
+            if X_tensor.shape != M_tensor.shape:
+                raise ValueError(f"Shape mismatch: X={X_tensor.shape}, M={M_tensor.shape}")
+
+            if X_tensor.shape[1] != config["feature_dim"]:
+                raise ValueError(f"Feature dim mismatch: data has {X_tensor.shape[1]}, model expects {config['feature_dim']}")
+
+            X_tensor = X_tensor.float()
+            M_tensor = M_tensor.float()
+
+            print(f"[inference] Data validation passed")
+        except Exception as e:
+            print(f"[inference] ERROR: Failed to load input tensors: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        try:
+            dataset = TensorDataset(X_tensor, M_tensor)
+            data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(device.type == "cuda"), drop_last=False)
+            print(f"[inference] DataLoader created. Samples: {len(dataset)}, Batches: {len(data_loader)}")
+        except Exception as e:
+            print(f"[inference] ERROR: Failed to create DataLoader: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        try:
+            print(f"[inference] ============================================")
+            print(f"[inference] Running Inference")
+            print(f"[inference] ============================================")
+
+            all_latents = []
+            all_reconstructed = []
+            start_time = time.time()
+
+            with torch.no_grad():
+                for batch_idx, (xb, mb) in enumerate(data_loader):
+                    xb = xb.to(device)
+                    mb = mb.to(device)
+                    x_hat, z = model(xb, mb)
+                    all_latents.append(z.cpu().numpy())
+                    all_reconstructed.append(x_hat.cpu().numpy())
+                    if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(data_loader):
+                        elapsed = time.time() - start_time
+                        print(f"[inference] Batch {batch_idx + 1}/{len(data_loader)} | Elapsed: {elapsed:.2f}s")
+
+            latent_matrix = np.vstack(all_latents)
+            reconstructed_matrix = np.vstack(all_reconstructed)
+            total_time = time.time() - start_time
+
+            print(f"[inference] Inference complete!")
+            print(f"[inference] Latent matrix shape:        {latent_matrix.shape}")
+            print(f"[inference] Reconstructed matrix shape: {reconstructed_matrix.shape}")
+            print(f"[inference] Total time: {total_time:.2f}s")
+        except Exception as e:
+            print(f"[inference] ERROR: Inference failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        try:
+            print(f"[inference] Saving latent representations as parquet...")
+            ensure_dir(args.latent_representations)
+
+            latent_cols = [f"latent_{i}" for i in range(latent_matrix.shape[1])]
+            latent_df = pd.DataFrame(latent_matrix, columns=latent_cols)
+            latent_df.insert(0, "sample_index", range(len(latent_df)))
+
+            latent_path = os.path.join(args.latent_representations, "latent_representations.parquet")
+            latent_df.to_parquet(latent_path, engine="pyarrow", index=False)
+
+            latent_size_mb = os.path.getsize(latent_path) / (1024 * 1024)
+            print(f"[inference] Latent parquet saved: {latent_path}")
+            print(f"[inference] Shape: {latent_df.shape}, Size: {latent_size_mb:.2f} MB")
+
+            latent_meta = {
+                "file": latent_path,
+                "n_samples": int(latent_matrix.shape[0]),
+                "latent_dim": int(latent_matrix.shape[1]),
+                "columns": latent_cols,
+                "dtype": str(latent_matrix.dtype),
+                "stats": {
+                    "mean": float(latent_matrix.mean()),
+                    "std": float(latent_matrix.std()),
+                    "min": float(latent_matrix.min()),
+                    "max": float(latent_matrix.max())
+                }
+            }
+            with open(os.path.join(args.latent_representations, "latent_metadata.json"), "w") as f:
+                json.dump(latent_meta, f, indent=2)
+            print(f"[inference] Latent metadata saved")
+        except Exception as e:
+            print(f"[inference] ERROR: Failed to save latent representations: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        try:
+            print(f"[inference] Saving reconstructed matrix as parquet...")
+            ensure_dir(args.reconstructed_matrix)
+
+            feature_cols = [f"feature_{i}" for i in range(reconstructed_matrix.shape[1])]
+            reconstructed_df = pd.DataFrame(reconstructed_matrix, columns=feature_cols)
+            reconstructed_df.insert(0, "sample_index", range(len(reconstructed_df)))
+
+            recon_path = os.path.join(args.reconstructed_matrix, "reconstructed_matrix.parquet")
+            reconstructed_df.to_parquet(recon_path, engine="pyarrow", index=False)
+
+            recon_size_mb = os.path.getsize(recon_path) / (1024 * 1024)
+            print(f"[inference] Reconstructed parquet saved: {recon_path}")
+            print(f"[inference] Shape: {reconstructed_df.shape}, Size: {recon_size_mb:.2f} MB")
+
+            recon_meta = {
+                "file": recon_path,
+                "n_samples": int(reconstructed_matrix.shape[0]),
+                "feature_dim": int(reconstructed_matrix.shape[1]),
+                "columns": feature_cols,
+                "dtype": str(reconstructed_matrix.dtype),
+                "stats": {
+                    "mean": float(reconstructed_matrix.mean()),
+                    "std": float(reconstructed_matrix.std()),
+                    "min": float(reconstructed_matrix.min()),
+                    "max": float(reconstructed_matrix.max())
+                }
+            }
+            with open(os.path.join(args.reconstructed_matrix, "reconstructed_metadata.json"), "w") as f:
+                json.dump(recon_meta, f, indent=2)
+            print(f"[inference] Reconstructed metadata saved")
+        except Exception as e:
+            print(f"[inference] ERROR: Failed to save reconstructed matrix: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+
+        print(f"[inference] ============================================")
+        print(f"[inference] Inference and Export Complete!")
+        print(f"[inference] ============================================")
+        print(f"[inference] Total samples:   {latent_matrix.shape[0]}")
+        print(f"[inference] Latent dim:      {latent_matrix.shape[1]}")
+        print(f"[inference] Feature dim:     {reconstructed_matrix.shape[1]}")
+        print(f"[inference] Total time:      {total_time:.2f}s")
+        print(f"[inference] Latent path:     {args.latent_representations}")
+        print(f"[inference] Recon path:      {args.reconstructed_matrix}")
+        print(f"[inference] ============================================")
+
+    args:
+      - --trained_model
+      - {inputPath: trained_model}
+      - --tensor_values
+      - {inputPath: tensor_values}
+      - --masked_tensor_values
+      - {inputPath: masked_tensor_values}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --loss_eps
+      - {inputValue: loss_eps}
+      - --random_seed
+      - {inputValue: random_seed}
+      - --latent_representations
+      - {outputPath: latent_representations}
+      - --reconstructed_matrix
+      - {outputPath: reconstructed_matrix}
