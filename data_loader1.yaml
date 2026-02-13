@@ -1,4 +1,4 @@
-name: Dataset downloader and splitter With preprocessing V1.1
+name: Dataset downloader and splitter With preprocessing V1.2
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
@@ -290,6 +290,7 @@ implementation:
             min_nonzero = 8      # if a column has fewer than this many non-zero entries, skip scaling
             
             # Prepare X_2d (2D view) - do not modify original_shape usage downstream
+            original_shape = X.shape
             if len(X.shape) > 2:
                 n_samples = X.shape[0]
                 X_2d = X.reshape(n_samples, -1)
