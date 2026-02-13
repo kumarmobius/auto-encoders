@@ -36,7 +36,7 @@ implementation:
         except Exception:
             from urllib3 import Retry
         from sklearn.model_selection import train_test_split
-        from sklearn.preprocessing import StandardScaler
+        from sklearn.preprocessing import StandardScaler,RobustScaler
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--tensor_values_cdn', required=True)
@@ -285,7 +285,7 @@ implementation:
             # ============================================
             logger.info("Applying StandardScaler to normalize data...")
             
-            scaler = StandardScaler()
+            scaler = RobustScaler()
             
             # Get original shape
             original_shape = X.shape
