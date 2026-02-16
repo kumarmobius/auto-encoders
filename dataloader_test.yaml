@@ -1,0 +1,510 @@
+name: Dataset downloader and splitter With preprocessing V20
+inputs:
+  - {name: tensor_values_cdn, type: String, optional: false}
+  - {name: masked_tensor_values_cdn, type: String, optional: false}
+  - {name: bearer_token, type: String, optional: true, default: ""}
+  - {name: test_size, type: Float, optional: true, default: "0.3"}
+  - {name: val_split, type: Float, optional: true, default: "0.5"}
+  - {name: random_state, type: Integer, optional: true, default: "42"}
+  - {name: batch_size, type: Integer, optional: true, default: "32"}
+  - {name: num_workers, type: Integer, optional: true, default: "0"}
+
+outputs:
+  - {name: tensor_values, type: Data}
+  - {name: masked_tensor_values, type: Data}
+  - {name: train_dataset, type: Data}
+  - {name: val_dataset, type: Data}
+  - {name: test_dataset, type: Data}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, tempfile, json, shutil, logging
+        import numpy as np
+        import pandas as pd
+        import torch
+        from torch.utils.data import Dataset, DataLoader, TensorDataset
+        import requests
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--tensor_values_cdn', required=True)
+        parser.add_argument('--masked_tensor_values_cdn', required=True)
+        parser.add_argument('--bearer_token', default="")
+        parser.add_argument('--test_size', type=float, default=0.3)
+        parser.add_argument('--val_split', type=float, default=0.5)
+        parser.add_argument('--random_state', type=int, default=42)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--tensor_values', required=True)
+        parser.add_argument('--masked_tensor_values', required=True)
+        parser.add_argument('--train_dataset', required=True)
+        parser.add_argument('--val_dataset', required=True)
+        parser.add_argument('--test_dataset', required=True)
+        args = parser.parse_args()
+
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        logger = logging.getLogger("pytorch_dataset_downloader_splitter")
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retry = Retry(total=5, backoff_factor=1, status_forcelist=[500,502,503,504])
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Setup headers with bearer token if provided
+        headers = {}
+        if args.bearer_token and os.path.exists(args.bearer_token):
+            with open(args.bearer_token, "r") as f:
+                token = f.read().strip()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+        def get_tensor_size_mb(tensor):
+            return tensor.element_size() * tensor.nelement() / (1024 * 1024)
+        def download_file(url):
+            try:
+                logger.info("Downloading from: %s", url)
+                r = session.get(url, headers=headers, timeout=60, stream=True)
+                r.raise_for_status()
+                fd, tmp = tempfile.mkstemp()
+                os.close(fd)
+                
+                # Stream large files in chunks
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                logger.info("Successfully downloaded to: %s", tmp)
+                return tmp
+            except Exception as e:
+                logger.error("Download failed for %s: %s", url, str(e))
+                raise
+
+        def load_data_multi_format(file_path):
+            logger.info("Loading data from: %s", file_path)
+            
+            # List of loading strategies to try
+            strategies = [
+                # Strategy 1: PyTorch Tensor
+                {
+                    'name': 'PyTorch Tensor',
+                    'func': lambda: torch.load(file_path, map_location='cpu').numpy() 
+                            if isinstance(torch.load(file_path, map_location='cpu'), torch.Tensor)
+                            else torch.load(file_path, map_location='cpu')
+                },
+                # Strategy 2: NumPy array (.npy)
+                {
+                    'name': 'NumPy (.npy)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)
+                },
+                # Strategy 3: NumPy compressed (.npz)
+                {
+                    'name': 'NumPy (.npz)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)['data']
+                },
+                # Strategy 4: Parquet (chunk-wise for large files)
+                {
+                    'name': 'Parquet',
+                    'func': lambda: load_large_parquet(file_path)
+                },
+                # Strategy 5: CSV
+                {
+                    'name': 'CSV',
+                    'func': lambda: pd.read_csv(file_path).values
+                },
+                # Strategy 6: Excel
+                {
+                    'name': 'Excel',
+                    'func': lambda: pd.read_excel(file_path).values
+                },
+                # Strategy 7: Tab-separated values
+                {
+                    'name': 'TSV',
+                    'func': lambda: pd.read_csv(file_path, sep='\t').values
+                },
+            ]
+            
+            # Try each strategy
+            last_error = None
+            for strategy in strategies:
+                try:
+                    logger.info("Trying to load as: %s", strategy['name'])
+                    data = strategy['func']()
+                    
+                    # Convert to numpy array if needed
+                    if isinstance(data, torch.Tensor):
+                        data = data.numpy()
+                    elif not isinstance(data, np.ndarray):
+                        data = np.array(data)
+                    
+                    logger.info("✓ Successfully loaded as %s with shape: %s", 
+                               strategy['name'], data.shape)
+                    return data
+                    
+                except Exception as e:
+                    logger.debug("Failed to load as %s: %s", strategy['name'], str(e))
+                    last_error = e
+                    continue
+            
+            # If all strategies failed, raise the last error
+            logger.error("All loading strategies failed!")
+            raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
+
+        def load_large_parquet(file_path):
+            logger.info("Loading large Parquet file in chunks...")
+            
+            try:
+                # First, try to get file size to determine if chunking is needed
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                logger.info("Parquet file size: %.2f MB", file_size_mb)
+                
+                # If file is small enough (< 500MB), load directly
+                if file_size_mb < 500:
+                    logger.info("File is small enough, loading directly...")
+                    df = pd.read_parquet(file_path, engine="pyarrow")
+                    return df.values
+                
+                # For large files, use chunked reading
+                logger.info("File is large, using chunked reading...")
+                import pyarrow.parquet as pq
+                
+                parquet_file = pq.ParquetFile(file_path)
+                chunks = []
+                
+                # Read in batches
+                batch_size = 100000  # Adjust based on available memory
+                for batch in parquet_file.iter_batches(batch_size=batch_size):
+                    chunk_df = batch.to_pandas()
+                    chunks.append(chunk_df.values)
+                    logger.info("Loaded batch with shape: %s", chunk_df.values.shape)
+                
+                # Concatenate all chunks
+                logger.info("Concatenating %d chunks...", len(chunks))
+                data = np.vstack(chunks)
+                logger.info("Final concatenated shape: %s", data.shape)
+                
+                return data
+                
+            except ImportError:
+                # Fallback if pyarrow is not available
+                logger.warning("pyarrow not available, trying with pandas...")
+                df = pd.read_parquet(file_path, engine="pyarrow")
+                return df.values
+
+        def save_tensor_output(tensor, output_path, data_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{data_name}.pt")
+            
+            torch.save(tensor, save_path)
+            logger.info("Saved %s to: %s", data_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "tensor_path": save_path,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype)
+                }, f)
+            
+            return save_path
+
+        def save_pytorch_dataset(dataset_tensors, output_path, dataset_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{dataset_name}.pt")
+            
+            # Save the tensors as a dictionary
+            torch.save({
+                'X': dataset_tensors[0],
+                'M': dataset_tensors[1]
+            }, save_path)
+            
+            logger.info("Saved %s to: %s", dataset_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "dataset_path": save_path,
+                    "shape_X": list(dataset_tensors[0].shape),
+                    "shape_M": list(dataset_tensors[1].shape)
+                }, f)
+            
+            return save_path
+
+        try:
+            # ============================================
+            # Download and Load Data
+            # ============================================
+            logger.info("Downloading tensor values...")
+            tensor_file = download_file(args.tensor_values_cdn)
+            tensor_values = load_data_multi_format(tensor_file)
+            os.remove(tensor_file)
+            
+            logger.info("Downloading masked tensor values...")
+            masked_file = download_file(args.masked_tensor_values_cdn)
+            M = load_data_multi_format(masked_file)
+            os.remove(masked_file)
+            
+            logger.info("tensor_values shape: %s, M shape: %s", tensor_values.shape, M.shape)
+            
+            # ============================================
+            # Convert to float32 and Handle NaN/Inf
+            # ============================================
+            logger.info("Converting tensor_values to float32...")
+            tensor_values = tensor_values.astype(np.float32)
+            
+            logger.info("Handling NaN, positive infinity, and negative infinity...")
+            # Count NaN/Inf values before cleaning
+            nan_count = np.isnan(tensor_values).sum()
+            posinf_count = np.isposinf(tensor_values).sum()
+            neginf_count = np.isneginf(tensor_values).sum()
+            
+            logger.info("Found - NaN: %d, +Inf: %d, -Inf: %d", nan_count, posinf_count, neginf_count)
+            
+            X = np.nan_to_num(
+                tensor_values,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0
+            )
+            
+            logger.info("✓ Cleaned all NaN and Inf values")
+            
+            # ============================================
+            # Apply Standard Scaler
+            # ============================================
+            logger.info("Applying StandardScaler to normalize data...")
+            
+            scaler = StandardScaler()
+            
+            # Get original shape
+            original_shape = X.shape
+            logger.info("Original shape: %s", original_shape)
+            
+            # Reshape for scaling if needed (StandardScaler expects 2D)
+            if len(X.shape) > 2:
+                # Flatten to 2D for scaling
+                n_samples = X.shape[0]
+                X_2d = X.reshape(n_samples, -1)
+                logger.info("Reshaped to 2D for scaling: %s", X_2d.shape)
+            else:
+                X_2d = X
+            
+            # Fit and transform
+            X_normalized = scaler.fit_transform(X_2d).astype(np.float16)
+            
+            # Reshape back to original shape if needed
+            if len(original_shape) > 2:
+                X_normalized = X_normalized.reshape(original_shape)
+                logger.info("Reshaped back to original: %s", X_normalized.shape)
+            
+            logger.info("✓ StandardScaler applied")
+            logger.info("  Mean: %.6f, Std: %.6f", X_normalized.mean(), X_normalized.std())
+            
+            # Process masked values
+            M = M.astype(np.float16)
+            
+            # Convert to PyTorch tensors for saving
+            X_tensor = torch.FloatTensor(X_normalized)
+            M_tensor = torch.FloatTensor(M)
+
+            logger.info("Full Tensor Memory Usage:")
+            logger.info("  X_tensor: %.2f MB", get_tensor_size_mb(X_tensor))
+            logger.info("  M_tensor: %.2f MB", get_tensor_size_mb(M_tensor))
+            
+            # ============================================
+            # Save Full Tensors as Outputs
+            # ============================================
+            logger.info("Saving full tensor outputs...")
+            
+            tensor_values_path = save_tensor_output(
+                X_tensor,
+                args.tensor_values,
+                "tensor_values"
+            )
+            
+            masked_tensor_values_path = save_tensor_output(
+                M_tensor,
+                args.masked_tensor_values,
+                "masked_tensor_values"
+            )
+            
+            logger.info("✓ Saved full tensors")
+            logger.info("  Tensor values: %s", tensor_values_path)
+            logger.info("  Masked tensor values: %s", masked_tensor_values_path)
+            
+            # ============================================
+            # STEP 1: Split Data
+            # ============================================
+            logger.info("Splitting data with test_size=%s, val_split=%s", 
+                       args.test_size, args.val_split)
+            
+            X_train, X_temp, M_train, M_temp = train_test_split(
+                X_normalized, M, test_size=args.test_size, random_state=args.random_state
+            )
+            X_val, X_test, M_val, M_test = train_test_split(
+                X_temp, M_temp, test_size=args.val_split, random_state=args.random_state
+            )
+            
+            logger.info("Train: %s, Val: %s, Test: %s", 
+                       X_train.shape, X_val.shape, X_test.shape)
+            
+            # ============================================
+            # STEP 2: Convert to PyTorch Tensors
+            # ============================================
+            logger.info("Converting to PyTorch tensors...")
+            
+            X_train_tensor = torch.FloatTensor(X_train)
+            M_train_tensor = torch.FloatTensor(M_train)
+            X_val_tensor = torch.FloatTensor(X_val)
+            M_val_tensor = torch.FloatTensor(M_val)
+            X_test_tensor = torch.FloatTensor(X_test)
+            M_test_tensor = torch.FloatTensor(M_test)
+            
+            logger.info("✓ Converted to PyTorch tensors")
+            
+            # ============================================
+            # STEP 3: Create PyTorch Datasets
+            # ============================================
+            logger.info("Creating PyTorch TensorDatasets...")
+            
+            train_dataset = TensorDataset(X_train_tensor, M_train_tensor)
+            val_dataset = TensorDataset(X_val_tensor, M_val_tensor)
+            test_dataset = TensorDataset(X_test_tensor, M_test_tensor)
+            
+            # ============================================
+            # STEP 4: Create DataLoaders
+            # ============================================
+            logger.info("Creating DataLoaders with batch_size=%s, num_workers=%s", 
+                       args.batch_size, args.num_workers)
+            
+            # Training DataLoader with shuffling
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            # Validation DataLoader (no shuffling)
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            # Test DataLoader (no shuffling)
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            logger.info("✓ Created DataLoaders")
+            logger.info("  Train batches: %d", len(train_loader))
+            logger.info("  Val batches: %d", len(val_loader))
+            logger.info("  Test batches: %d", len(test_loader))
+            
+            # ============================================
+            # Save Split Datasets
+            # ============================================
+            logger.info("Saving PyTorch datasets...")
+            
+            train_path = save_pytorch_dataset(
+                (X_train_tensor, M_train_tensor), 
+                args.train_dataset, 
+                "train_dataset"
+            )
+            val_path = save_pytorch_dataset(
+                (X_val_tensor, M_val_tensor), 
+                args.val_dataset, 
+                "val_dataset"
+            )
+            test_path = save_pytorch_dataset(
+                (X_test_tensor, M_test_tensor), 
+                args.test_dataset, 
+                "test_dataset"
+            )
+            
+            logger.info("All datasets saved successfully!")
+            logger.info("Train: %s", train_path)
+            logger.info("Val: %s", val_path)
+            logger.info("Test: %s", test_path)
+            
+            # Save DataLoader info for reference
+            dataloader_info = {
+                "batch_size": args.batch_size,
+                "num_workers": args.num_workers,
+                "train_batches": len(train_loader),
+                "val_batches": len(val_loader),
+                "test_batches": len(test_loader),
+                "train_samples": len(train_dataset),
+                "val_samples": len(val_dataset),
+                "test_samples": len(test_dataset),
+                "full_tensor_shape": list(X_tensor.shape),
+                "full_masked_tensor_shape": list(M_tensor.shape),
+                "preprocessing": {
+                    "nan_count_removed": int(nan_count),
+                    "posinf_count_removed": int(posinf_count),
+                    "neginf_count_removed": int(neginf_count),
+                    "scaler_applied": "StandardScaler",
+                    "final_mean": float(X_normalized.mean()),
+                    "final_std": float(X_normalized.std())
+                }
+            }
+            
+            info_path = os.path.join(args.train_dataset, "dataloader_info.json")
+            with open(info_path, "w") as f:
+                json.dump(dataloader_info, f, indent=2)
+            logger.info("DataLoader info saved to: %s", info_path)
+            
+        except Exception as e:
+            logger.exception("Fatal error in dataset processing: %s", str(e))
+            sys.exit(1)
+
+    args:
+      - --tensor_values_cdn
+      - {inputValue: tensor_values_cdn}
+      - --masked_tensor_values_cdn
+      - {inputValue: masked_tensor_values_cdn}
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --test_size
+      - {inputValue: test_size}
+      - --val_split
+      - {inputValue: val_split}
+      - --random_state
+      - {inputValue: random_state}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --tensor_values
+      - {outputPath: tensor_values}
+      - --masked_tensor_values
+      - {outputPath: masked_tensor_values}
+      - --train_dataset
+      - {outputPath: train_dataset}
+      - --val_dataset
+      - {outputPath: val_dataset}
+      - --test_dataset
+      - {outputPath: test_dataset}
