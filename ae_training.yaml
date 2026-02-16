@@ -1,48 +1,48 @@
-name: Mask Aware Autoencoder Trainer
+name: Mask Aware Autoencoder Trainer v1.1
 description: Train Mask-Aware Autoencoder model with training/validation datasets and save trained model
 inputs:
   # Dataset inputs
   - {name: train_dataset, type: Data, description: "Training dataset (.pt file)"}
   - {name: val_dataset, type: Data, description: "Validation dataset (.pt file)"}
   - {name: model_file, type: Model, description: "Initial model file (.pth)"}
-  
+
   # Training hyperparameters
   - {name: epochs, type: Integer, description: "Number of training epochs", default: "100"}
   - {name: learning_rate, type: Float, description: "Learning rate for optimizer", default: "0.00001"}
   - {name: batch_size, type: Integer, description: "Batch size for training", default: "32"}
-  
+
   # Optimizer parameters
   - {name: optimizer_type, type: String, description: "Optimizer type (adam, sgd, adamw)", default: "adam"}
   - {name: beta1, type: Float, description: "Adam beta1 parameter", default: "0.9"}
   - {name: beta2, type: Float, description: "Adam beta2 parameter", default: "0.999"}
   - {name: weight_decay, type: Float, description: "Weight decay (L2 regularization)", default: "0.0"}
-  
+
   # Gradient clipping
   - {name: gradient_clip_enabled, type: String, description: "Enable gradient clipping (true/false)", default: "true"}
   - {name: gradient_clip_max_norm, type: Float, description: "Max gradient norm for clipping", default: "1.0"}
-  
+
   # Loss function parameters
   - {name: loss_eps, type: Float, description: "Epsilon for numerical stability in loss", default: "0.000001"}
-  
+
   # Early stopping
   - {name: early_stopping_enabled, type: String, description: "Enable early stopping (true/false)", default: "true"}
   - {name: early_stopping_patience, type: Integer, description: "Early stopping patience (epochs)", default: "10"}
   - {name: early_stopping_min_delta, type: Float, description: "Minimum change to qualify as improvement", default: "0.000001"}
-  
+
   # Learning rate scheduler
   - {name: scheduler_enabled, type: String, description: "Enable learning rate scheduler (true/false)", default: "false"}
   - {name: scheduler_type, type: String, description: "Scheduler type (reduce_on_plateau, step, exponential)", default: "reduce_on_plateau"}
   - {name: scheduler_factor, type: Float, description: "Factor to reduce learning rate", default: "0.5"}
   - {name: scheduler_patience, type: Integer, description: "Scheduler patience (epochs)", default: "5"}
-  
+
   # Logging and checkpointing
   - {name: save_every_n_epochs, type: Integer, description: "Save checkpoint every N epochs (0=disabled)", default: "0"}
   - {name: print_every_n_batches, type: Integer, description: "Print loss every N batches", default: "10"}
-  
+
   # Device configuration
   - {name: device, type: String, description: "Device to train on (cuda, cpu, auto)", default: "auto"}
   - {name: num_workers, type: Integer, description: "Number of data loader workers", default: "0"}
-  
+
   # Random seed
   - {name: random_seed, type: Integer, description: "Random seed for reproducibility", default: "42"}
 
@@ -66,83 +66,69 @@ implementation:
         import time
         import traceback
         from pathlib import Path
-        
+
         import numpy as np
         import torch
         import torch.nn as nn
         import torch.optim as optim
         from torch.utils.data import DataLoader, TensorDataset
-        
+
         # ============================================
         # Argument Parser
         # ============================================
         parser = argparse.ArgumentParser(description="Train Mask-Aware Autoencoder")
-        
-        # Datasets and model
         parser.add_argument("--train_dataset", type=str, required=True)
         parser.add_argument("--val_dataset", type=str, required=True)
         parser.add_argument("--model_file", type=str, required=True)
-        
-        # Training hyperparameters
         parser.add_argument("--epochs", type=int, required=True)
         parser.add_argument("--learning_rate", type=float, required=True)
         parser.add_argument("--batch_size", type=int, required=True)
-        
-        # Optimizer
         parser.add_argument("--optimizer_type", type=str, required=True)
         parser.add_argument("--beta1", type=float, required=True)
         parser.add_argument("--beta2", type=float, required=True)
         parser.add_argument("--weight_decay", type=float, required=True)
-        
-        # Gradient clipping
         parser.add_argument("--gradient_clip_enabled", type=str, required=True)
         parser.add_argument("--gradient_clip_max_norm", type=float, required=True)
-        
-        # Loss
         parser.add_argument("--loss_eps", type=float, required=True)
-        
-        # Early stopping
         parser.add_argument("--early_stopping_enabled", type=str, required=True)
         parser.add_argument("--early_stopping_patience", type=int, required=True)
         parser.add_argument("--early_stopping_min_delta", type=float, required=True)
-        
-        # Scheduler
         parser.add_argument("--scheduler_enabled", type=str, required=True)
         parser.add_argument("--scheduler_type", type=str, required=True)
         parser.add_argument("--scheduler_factor", type=float, required=True)
         parser.add_argument("--scheduler_patience", type=int, required=True)
-        
-        # Logging
         parser.add_argument("--save_every_n_epochs", type=int, required=True)
         parser.add_argument("--print_every_n_batches", type=int, required=True)
-        
-        # Device
         parser.add_argument("--device", type=str, required=True)
         parser.add_argument("--num_workers", type=int, required=True)
         parser.add_argument("--random_seed", type=int, required=True)
-        
-        # Outputs
         parser.add_argument("--trained_model", type=str, required=True)
         parser.add_argument("--training_history", type=str, required=True)
         parser.add_argument("--best_model", type=str, required=True)
-        
         args = parser.parse_args()
-        
+
         print("[trainer] ============================================")
         print("[trainer] Mask-Aware Autoencoder Training")
         print("[trainer] ============================================")
-        
+
         # ============================================
         # Helper Functions
         # ============================================
         def str_to_bool(s):
             return s.lower() in ['true', '1', 'yes']
-        
+
         def get_device(device_str):
             if device_str == 'auto':
                 return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             return torch.device(device_str)
-        
+
+        def get_activation(name):
+            activations = {
+                'relu': nn.ReLU(), 'tanh': nn.Tanh(), 'elu': nn.ELU(),
+                'leaky_relu': nn.LeakyReLU(), 'sigmoid': nn.Sigmoid(), 'none': None
+            }
+            return activations.get(name.lower(), nn.ReLU())
+
         # ============================================
         # Set Random Seed
         # ============================================
@@ -150,295 +136,239 @@ implementation:
         np.random.seed(args.random_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.random_seed)
-        
+
         device = get_device(args.device)
         print(f"[trainer] Device: {device}")
         print(f"[trainer] Random seed: {args.random_seed}")
-        
+
         # ============================================
-        # Model Definitions (Same as builder)
+        #  MAEEncoder — Dynamic N layers
+        #    Reads layer_sizes list from config
+        #    (not hardcoded layer1_units/layer2_units)
         # ============================================
-        def get_activation(name):
-            activations = {
-                'relu': nn.ReLU(),
-                'tanh': nn.Tanh(),
-                'elu': nn.ELU(),
-                'leaky_relu': nn.LeakyReLU(),
-                'sigmoid': nn.Sigmoid(),
-                'none': None
-            }
-            return activations.get(name.lower(), nn.ReLU())
-        
         class MAEEncoder(nn.Module):
-            def __init__(self, feature_dim, latent_dim, 
-                         layer1_units, layer2_units,
-                         activation, dropout, batch_norm):
+            def __init__(self, feature_dim, latent_dim,
+                         layer_sizes, activation, dropout, batch_norm):
                 super(MAEEncoder, self).__init__()
-                
+
+                # Input = [x, mask] concatenated -> 2 * feature_dim
                 input_dim = 2 * feature_dim
-                layers = []
-                
-                # Layer 1
-                layers.append(nn.Linear(input_dim, layer1_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer1_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                
-                # Layer 2
-                layers.append(nn.Linear(layer1_units, layer2_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer2_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                
-                # Layer 3
-                layers.append(nn.Linear(layer2_units, latent_dim))
-                
+                prev_dim  = input_dim
+                layers    = []
+
+                print(f"[trainer]   Encoder input : {input_dim} (features + mask)")
+                for idx, units in enumerate(layer_sizes):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    if activation is not None:
+                        layers.append(activation)
+                    if dropout > 0:
+                        layers.append(nn.Dropout(dropout))
+                    print(f"[trainer]   Encoder Layer {idx + 1}: {prev_dim} -> {units}")
+                    prev_dim = units
+
+                # Final projection to latent space
+                layers.append(nn.Linear(prev_dim, latent_dim))
+                print(f"[trainer]   Encoder Latent : {prev_dim} -> {latent_dim}")
+
                 self.encoder = nn.Sequential(*layers)
-            
+
             def forward(self, x, m):
                 x_in = torch.cat([x, m], dim=1)
                 return self.encoder(x_in)
-        
+
+        # ============================================
+        #  MAEDecoder — Dynamic N layers
+        #    Reads layer_sizes list from config
+        # ============================================
         class MAEDecoder(nn.Module):
             def __init__(self, feature_dim, latent_dim,
-                         layer1_units, layer2_units,
-                         activation, dropout, batch_norm):
+                         layer_sizes, activation, dropout, batch_norm):
                 super(MAEDecoder, self).__init__()
-                
-                layers = []
-                
-                # Layer 1
-                layers.append(nn.Linear(latent_dim, layer1_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer1_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                
-                # Layer 2
-                layers.append(nn.Linear(layer1_units, layer2_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer2_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                
-                # Output layer
-                layers.append(nn.Linear(layer2_units, feature_dim))
-                
+
+                prev_dim = latent_dim
+                layers   = []
+
+                print(f"[trainer]   Decoder input : {latent_dim} (latent)")
+                for idx, units in enumerate(layer_sizes):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    if activation is not None:
+                        layers.append(activation)
+                    if dropout > 0:
+                        layers.append(nn.Dropout(dropout))
+                    print(f"[trainer]   Decoder Layer {idx + 1}: {prev_dim} -> {units}")
+                    prev_dim = units
+
+                # Final reconstruction output
+                layers.append(nn.Linear(prev_dim, feature_dim))
+                print(f"[trainer]   Decoder Output : {prev_dim} -> {feature_dim}")
+
                 self.decoder = nn.Sequential(*layers)
-            
+
             def forward(self, z):
                 return self.decoder(z)
-        
+
         class MaskAwareAutoencoder(nn.Module):
             def __init__(self, feature_dim, latent_dim,
                          encoder_config, decoder_config):
                 super(MaskAwareAutoencoder, self).__init__()
-                
+
                 self.feature_dim = feature_dim
-                self.latent_dim = latent_dim
-                
+                self.latent_dim  = latent_dim
+
                 self.encoder = MAEEncoder(
-                    feature_dim, latent_dim,
-                    encoder_config['layer1_units'],
-                    encoder_config['layer2_units'],
-                    encoder_config['activation'],
-                    encoder_config['dropout'],
-                    encoder_config['batch_norm']
+                    feature_dim = feature_dim,
+                    latent_dim  = latent_dim,
+                    layer_sizes = encoder_config['layer_sizes'],   #  list
+                    activation  = encoder_config['activation'],
+                    dropout     = encoder_config['dropout'],
+                    batch_norm  = encoder_config['batch_norm']
                 )
-                
+
                 self.decoder = MAEDecoder(
-                    feature_dim, latent_dim,
-                    decoder_config['layer1_units'],
-                    decoder_config['layer2_units'],
-                    decoder_config['activation'],
-                    decoder_config['dropout'],
-                    decoder_config['batch_norm']
+                    feature_dim = feature_dim,
+                    latent_dim  = latent_dim,
+                    layer_sizes = decoder_config['layer_sizes'],   #  list
+                    activation  = decoder_config['activation'],
+                    dropout     = decoder_config['dropout'],
+                    batch_norm  = decoder_config['batch_norm']
                 )
-            
+
             def forward(self, x, m):
-                z = self.encoder(x, m)
+                z     = self.encoder(x, m)
                 x_hat = self.decoder(z)
                 return x_hat, z
-        
+
         # ============================================
         # Loss Function
         # ============================================
         def mae_loss(x_hat, x_true, mask, eps=1e-6):
-            # Per-sample squared error
-            err = torch.square(x_hat - x_true) * mask
-            
-            # Sum over features (per sample)
-            num = torch.sum(err, dim=1)
-            den = torch.sum(mask, dim=1)
-            
-            # Avoid division by zero
-            den = torch.clamp(den, min=eps)
-            
-            # Per-sample normalized loss
-            loss_per_sample = num / den
-            
-            # Batch mean
+            err              = torch.square(x_hat - x_true) * mask
+            num              = torch.sum(err,  dim=1)
+            den              = torch.clamp(torch.sum(mask, dim=1), min=eps)
+            loss_per_sample  = num / den
             return torch.mean(loss_per_sample)
-        
+
         # ============================================
         # Load Model
         # ============================================
         try:
             print(f"[trainer] Loading model from: {args.model_file}")
-            
-            # Find the .pth file
+
             model_files = list(Path(args.model_file).glob("*.pth"))
             if not model_files:
                 raise FileNotFoundError(f"No .pth file found in {args.model_file}")
-            
+
             model_path = model_files[0]
             print(f"[trainer] Model file: {model_path}")
-            
+
             checkpoint = torch.load(model_path, map_location=device)
-            
-            # Extract config
-            config = checkpoint['model_config']
+            config     = checkpoint['model_config']
+
             print(f"[trainer] Model config loaded")
-            print(f"[trainer]   Feature dim: {config['feature_dim']}")
-            print(f"[trainer]   Latent dim: {config['latent_dim']}")
-            
-            # Rebuild model
+            print(f"[trainer]   Feature dim    : {config['feature_dim']}")
+            print(f"[trainer]   Latent dim     : {config['latent_dim']}")
+            print(f"[trainer]   Encoder layers : {config['encoder']['layer_sizes']}")
+            print(f"[trainer]   Decoder layers : {config['decoder']['layer_sizes']}")
+
+            #  Build configs using layer_sizes (not layer1_units/layer2_units)
             encoder_config = {
-                'layer1_units': config['encoder']['layer1_units'],
-                'layer2_units': config['encoder']['layer2_units'],
-                'activation': get_activation(config['encoder']['activation']),
-                'dropout': config['encoder']['dropout'],
-                'batch_norm': str_to_bool(config['encoder']['batch_norm'])
+                'layer_sizes': config['encoder']['layer_sizes'],   #  fixed key
+                'activation':  get_activation(config['encoder']['activation']),
+                'dropout':     config['encoder']['dropout'],
+                'batch_norm':  str_to_bool(str(config['encoder']['batch_norm']))
             }
-            
+
             decoder_config = {
-                'layer1_units': config['decoder']['layer1_units'],
-                'layer2_units': config['decoder']['layer2_units'],
-                'activation': get_activation(config['decoder']['activation']),
-                'dropout': config['decoder']['dropout'],
-                'batch_norm': str_to_bool(config['decoder']['batch_norm'])
+                'layer_sizes': config['decoder']['layer_sizes'],   #  fixed key
+                'activation':  get_activation(config['decoder']['activation']),
+                'dropout':     config['decoder']['dropout'],
+                'batch_norm':  str_to_bool(str(config['decoder']['batch_norm']))
             }
-            
+
             model = MaskAwareAutoencoder(
-                feature_dim=config['feature_dim'],
-                latent_dim=config['latent_dim'],
-                encoder_config=encoder_config,
-                decoder_config=decoder_config
+                feature_dim    = config['feature_dim'],
+                latent_dim     = config['latent_dim'],
+                encoder_config = encoder_config,
+                decoder_config = decoder_config
             )
-            
-            # Load weights
+
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(device)
-            
+
             print(f"[trainer] ✓ Model loaded and moved to {device}")
-            print(f"[trainer] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-            
+            print(f"[trainer]   Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+
         except Exception as e:
             print(f"[trainer] ERROR: Failed to load model: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         # ============================================
         # Load Datasets
         # ============================================
         try:
             print(f"[trainer] Loading datasets...")
-            
-            # Load training dataset
+
             train_files = list(Path(args.train_dataset).glob("*.pt"))
             if not train_files:
                 raise FileNotFoundError(f"No .pt file found in {args.train_dataset}")
-            train_data = torch.load(train_files[0])
+            train_data    = torch.load(train_files[0])
             train_dataset = TensorDataset(train_data['X'], train_data['M'])
-            
-            # Load validation dataset
+
             val_files = list(Path(args.val_dataset).glob("*.pt"))
             if not val_files:
                 raise FileNotFoundError(f"No .pt file found in {args.val_dataset}")
-            val_data = torch.load(val_files[0])
+            val_data    = torch.load(val_files[0])
             val_dataset = TensorDataset(val_data['X'], val_data['M'])
-            
+
             print(f"[trainer] ✓ Datasets loaded")
-            print(f"[trainer]   Train samples: {len(train_dataset)}")
-            print(f"[trainer]   Val samples: {len(val_dataset)}")
-            
-            # Create DataLoaders
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=args.num_workers,
-                pin_memory=(device.type == 'cuda'),
-                drop_last=False
-            )
-            
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=(device.type == 'cuda'),
-                drop_last=False
-            )
-            
-            print(f"[trainer] ✓ DataLoaders created")
-            print(f"[trainer]   Train batches: {len(train_loader)}")
-            print(f"[trainer]   Val batches: {len(val_loader)}")
-            
+            print(f"[trainer]   Train samples : {len(train_dataset)}")
+            print(f"[trainer]   Val samples   : {len(val_dataset)}")
+
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                      shuffle=True,  num_workers=args.num_workers,
+                                      pin_memory=(device.type == 'cuda'), drop_last=False)
+            val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers,
+                                      pin_memory=(device.type == 'cuda'), drop_last=False)
+
+            print(f"[trainer]   Train batches : {len(train_loader)}")
+            print(f"[trainer]   Val batches   : {len(val_loader)}")
+
         except Exception as e:
             print(f"[trainer] ERROR: Failed to load datasets: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         # ============================================
         # Setup Optimizer
         # ============================================
         try:
-            print(f"[trainer] Setting up optimizer...")
-            
             if args.optimizer_type.lower() == 'adam':
-                optimizer = optim.Adam(
-                    model.parameters(),
-                    lr=args.learning_rate,
-                    betas=(args.beta1, args.beta2),
-                    weight_decay=args.weight_decay
-                )
+                optimizer = optim.Adam(model.parameters(), lr=args.learning_rate,
+                                       betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
             elif args.optimizer_type.lower() == 'adamw':
-                optimizer = optim.AdamW(
-                    model.parameters(),
-                    lr=args.learning_rate,
-                    betas=(args.beta1, args.beta2),
-                    weight_decay=args.weight_decay
-                )
+                optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate,
+                                        betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
             elif args.optimizer_type.lower() == 'sgd':
-                optimizer = optim.SGD(
-                    model.parameters(),
-                    lr=args.learning_rate,
-                    momentum=0.9,
-                    weight_decay=args.weight_decay
-                )
+                optimizer = optim.SGD(model.parameters(), lr=args.learning_rate,
+                                      momentum=0.9, weight_decay=args.weight_decay)
             else:
                 raise ValueError(f"Unknown optimizer: {args.optimizer_type}")
-            
-            print(f"[trainer] ✓ Optimizer: {args.optimizer_type}")
-            print(f"[trainer]   Learning rate: {args.learning_rate}")
-            print(f"[trainer]   Weight decay: {args.weight_decay}")
-            
+
+            print(f"[trainer] ✓ Optimizer : {args.optimizer_type}")
+            print(f"[trainer]   LR        : {args.learning_rate}")
+            print(f"[trainer]   WD        : {args.weight_decay}")
+
         except Exception as e:
             print(f"[trainer] ERROR: Failed to setup optimizer: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         # ============================================
         # Setup Scheduler
         # ============================================
@@ -447,307 +377,246 @@ implementation:
             try:
                 if args.scheduler_type == 'reduce_on_plateau':
                     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                        optimizer,
-                        mode='min',
-                        factor=args.scheduler_factor,
-                        patience=args.scheduler_patience,
-                        verbose=True
-                    )
+                        optimizer, mode='min', factor=args.scheduler_factor,
+                        patience=args.scheduler_patience, verbose=True)
                 elif args.scheduler_type == 'step':
                     scheduler = optim.lr_scheduler.StepLR(
-                        optimizer,
-                        step_size=args.scheduler_patience,
-                        gamma=args.scheduler_factor
-                    )
+                        optimizer, step_size=args.scheduler_patience, gamma=args.scheduler_factor)
                 elif args.scheduler_type == 'exponential':
-                    scheduler = optim.lr_scheduler.ExponentialLR(
-                        optimizer,
-                        gamma=args.scheduler_factor
-                    )
-                
+                    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.scheduler_factor)
                 print(f"[trainer] ✓ Scheduler: {args.scheduler_type}")
             except Exception as e:
                 print(f"[trainer] WARNING: Failed to setup scheduler: {e}")
-        
+
         # ============================================
         # Training Loop
         # ============================================
         print(f"[trainer] ============================================")
         print(f"[trainer] Starting Training")
         print(f"[trainer] ============================================")
-        print(f"[trainer] Epochs: {args.epochs}")
-        print(f"[trainer] Batch size: {args.batch_size}")
-        print(f"[trainer] Gradient clipping: {args.gradient_clip_enabled}")
-        if str_to_bool(args.gradient_clip_enabled):
-            print(f"[trainer] Gradient clip max norm: {args.gradient_clip_max_norm}")
-        print(f"[trainer] Early stopping: {args.early_stopping_enabled}")
-        if str_to_bool(args.early_stopping_enabled):
-            print(f"[trainer] Early stopping patience: {args.early_stopping_patience}")
+        print(f"[trainer] Epochs              : {args.epochs}")
+        print(f"[trainer] Batch size          : {args.batch_size}")
+        print(f"[trainer] Gradient clipping   : {args.gradient_clip_enabled}")
+        print(f"[trainer] Early stopping      : {args.early_stopping_enabled}")
+        print(f"[trainer] Encoder layers      : {config['encoder']['layer_sizes']}")
+        print(f"[trainer] Decoder layers      : {config['decoder']['layer_sizes']}")
         print(f"[trainer] ============================================")
-        
-        # Training history
-        history = {
-            'train_loss': [],
-            'val_loss': [],
-            'learning_rates': [],
-            'epoch_times': []
-        }
-        
-        best_val_loss = float('inf')
-        best_epoch = 0
+
+        history          = {'train_loss': [], 'val_loss': [], 'learning_rates': [], 'epoch_times': []}
+        best_val_loss    = float('inf')
+        best_epoch       = 0
         patience_counter = 0
-        
+
         try:
             for epoch in range(args.epochs):
                 epoch_start_time = time.time()
-                
-                # ============================================
-                # Training Phase
-                # ============================================
+
+                # --- Training ---
                 model.train()
                 train_losses = []
-                
+
                 for batch_idx, (xb, mb) in enumerate(train_loader):
-                    # Move to device
-                    xb = xb.to(device)
-                    mb = mb.to(device)
-                    
-                    # Forward pass
+                    xb    = xb.to(device)
+                    mb    = mb.to(device)
                     x_hat, z = model(xb, mb)
-                    loss = mae_loss(x_hat, xb, mb, eps=args.loss_eps)
-                    
-                    # Backward pass
+                    loss  = mae_loss(x_hat, xb, mb, eps=args.loss_eps)
+
                     optimizer.zero_grad()
                     loss.backward()
-                    
-                    # Gradient clipping
+
                     if str_to_bool(args.gradient_clip_enabled):
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(), 
-                            args.gradient_clip_max_norm
-                        )
-                    
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_clip_max_norm)
+
                     optimizer.step()
-                    
                     train_losses.append(loss.item())
-                    
-                    # Print batch loss
+
                     if args.print_every_n_batches > 0 and (batch_idx + 1) % args.print_every_n_batches == 0:
                         print(f"[trainer] Epoch {epoch+1}/{args.epochs} | "
                               f"Batch {batch_idx+1}/{len(train_loader)} | "
                               f"Loss: {loss.item():.6f}")
-                
+
                 avg_train_loss = np.mean(train_losses)
-                
-                # ============================================
-                # Validation Phase
-                # ============================================
+
+                # --- Validation ---
                 model.eval()
                 val_losses = []
-                
                 with torch.no_grad():
                     for xb, mb in val_loader:
                         xb = xb.to(device)
                         mb = mb.to(device)
-                        
                         x_hat, z = model(xb, mb)
-                        loss = mae_loss(x_hat, xb, mb, eps=args.loss_eps)
-                        
-                        val_losses.append(loss.item())
-                
+                        val_losses.append(mae_loss(x_hat, xb, mb, eps=args.loss_eps).item())
+
                 avg_val_loss = np.mean(val_losses)
-                
-                # Record history
-                epoch_time = time.time() - epoch_start_time
+                epoch_time   = time.time() - epoch_start_time
+
                 history['train_loss'].append(avg_train_loss)
                 history['val_loss'].append(avg_val_loss)
                 history['learning_rates'].append(optimizer.param_groups[0]['lr'])
                 history['epoch_times'].append(epoch_time)
-                
-                # Print epoch summary
-                print(f"[trainer] ============================================")
+
+                print(f"[trainer] ==========================================")
                 print(f"[trainer] Epoch {epoch+1}/{args.epochs} Summary")
-                print(f"[trainer] ============================================")
-                print(f"[trainer] Train Loss: {avg_train_loss:.6f}")
-                print(f"[trainer] Val Loss:   {avg_val_loss:.6f}")
-                print(f"[trainer] LR:         {optimizer.param_groups[0]['lr']:.8f}")
-                print(f"[trainer] Time:       {epoch_time:.2f}s")
-                
-                # Update learning rate scheduler
+                print(f"[trainer]   Train Loss : {avg_train_loss:.6f}")
+                print(f"[trainer]   Val Loss   : {avg_val_loss:.6f}")
+                print(f"[trainer]   LR         : {optimizer.param_groups[0]['lr']:.8f}")
+                print(f"[trainer]   Time       : {epoch_time:.2f}s")
+
                 if scheduler is not None:
                     if args.scheduler_type == 'reduce_on_plateau':
                         scheduler.step(avg_val_loss)
                     else:
                         scheduler.step()
-                
-                # Check for best model
+
+                # --- Best model check ---
                 if avg_val_loss < best_val_loss - args.early_stopping_min_delta:
-                    best_val_loss = avg_val_loss
-                    best_epoch = epoch + 1
+                    best_val_loss    = avg_val_loss
+                    best_epoch       = epoch + 1
                     patience_counter = 0
-                    
                     print(f"[trainer] ✓ New best model! Val loss: {best_val_loss:.6f}")
-                    
-                    # Save best model
+
                     os.makedirs(args.best_model, exist_ok=True)
                     best_model_path = os.path.join(args.best_model, 'best_model.pth')
-                    
                     torch.save({
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
+                        'epoch':                epoch + 1,
+                        'model_state_dict':     model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'train_loss': avg_train_loss,
-                        'val_loss': avg_val_loss,
-                        'model_config': config,
-                        'best_epoch': best_epoch,
-                        'best_val_loss': best_val_loss
+                        'train_loss':           avg_train_loss,
+                        'val_loss':             avg_val_loss,
+                        'model_config':         config,   #  always saved with full config
+                        'best_epoch':           best_epoch,
+                        'best_val_loss':        best_val_loss
                     }, best_model_path)
-                    
+
                 else:
                     patience_counter += 1
-                    print(f"[trainer] No improvement. Patience: {patience_counter}/{args.early_stopping_patience}")
-                
-                # Save periodic checkpoint
+                    print(f"[trainer]   No improvement. Patience: {patience_counter}/{args.early_stopping_patience}")
+
+                # --- Periodic checkpoint ---
                 if args.save_every_n_epochs > 0 and (epoch + 1) % args.save_every_n_epochs == 0:
-                    checkpoint_dir = os.path.join(args.trained_model, 'checkpoints')
+                    checkpoint_dir  = os.path.join(args.trained_model, 'checkpoints')
                     os.makedirs(checkpoint_dir, exist_ok=True)
                     checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pth')
-                    
                     torch.save({
-                        'epoch': epoch + 1,
+                        'epoch':            epoch + 1,
                         'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'train_loss': avg_train_loss,
-                        'val_loss': avg_val_loss,
-                        'model_config': config
+                        'train_loss':       avg_train_loss,
+                        'val_loss':         avg_val_loss,
+                        'model_config':     config         #  config always travels with checkpoint
                     }, checkpoint_path)
-                    
                     print(f"[trainer] ✓ Checkpoint saved: {checkpoint_path}")
-                
-                print(f"[trainer] ============================================")
-                
-                # Early stopping
+
+                # --- Early stopping ---
                 if str_to_bool(args.early_stopping_enabled) and patience_counter >= args.early_stopping_patience:
-                    print(f"[trainer] ⏹ Early stopping triggered after {epoch+1} epochs")
-                    print(f"[trainer] Best model was at epoch {best_epoch} with val loss {best_val_loss:.6f}")
+                    print(f"[trainer]  Early stopping triggered after {epoch+1} epochs")
+                    print(f"[trainer]   Best epoch    : {best_epoch}")
+                    print(f"[trainer]   Best val loss : {best_val_loss:.6f}")
                     break
-            
+
             print(f"[trainer] ============================================")
             print(f"[trainer] Training Completed!")
             print(f"[trainer] ============================================")
-            print(f"[trainer] Best epoch: {best_epoch}")
-            print(f"[trainer] Best val loss: {best_val_loss:.6f}")
-            print(f"[trainer] Total epochs: {len(history['train_loss'])}")
-            print(f"[trainer] Total time: {sum(history['epoch_times']):.2f}s")
-            print(f"[trainer] ============================================")
-            
+            print(f"[trainer]   Best epoch    : {best_epoch}")
+            print(f"[trainer]   Best val loss : {best_val_loss:.6f}")
+            print(f"[trainer]   Total epochs  : {len(history['train_loss'])}")
+            print(f"[trainer]   Total time    : {sum(history['epoch_times']):.2f}s")
+
         except Exception as e:
             print(f"[trainer] ERROR: Training failed: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         # ============================================
         # Save Final Model
         # ============================================
         try:
-            print(f"[trainer] Saving final trained model...")
-            
             os.makedirs(args.trained_model, exist_ok=True)
             final_model_path = os.path.join(args.trained_model, 'trained_model.pth')
-            
             torch.save({
-                'epoch': len(history['train_loss']),
-                'model_state_dict': model.state_dict(),
+                'epoch':                len(history['train_loss']),
+                'model_state_dict':     model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': history['train_loss'][-1],
-                'val_loss': history['val_loss'][-1],
-                'model_config': config,
-                'training_complete': True,
-                'best_epoch': best_epoch,
-                'best_val_loss': best_val_loss
+                'train_loss':           history['train_loss'][-1],
+                'val_loss':             history['val_loss'][-1],
+                'model_config':         config,   #  config always travels with the model
+                'training_complete':    True,
+                'best_epoch':           best_epoch,
+                'best_val_loss':        best_val_loss
             }, final_model_path)
-            
             print(f"[trainer] ✓ Final model saved: {final_model_path}")
-            
+
         except Exception as e:
             print(f"[trainer] ERROR: Failed to save final model: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         # ============================================
         # Save Training History
         # ============================================
         try:
-            print(f"[trainer] Saving training history...")
-            
             os.makedirs(args.training_history, exist_ok=True)
             history_path = os.path.join(args.training_history, 'training_history.json')
-            
-            # Convert to serializable format
+
             history_dict = {
-                'train_loss': [float(x) for x in history['train_loss']],
-                'val_loss': [float(x) for x in history['val_loss']],
+                'train_loss':     [float(x) for x in history['train_loss']],
+                'val_loss':       [float(x) for x in history['val_loss']],
                 'learning_rates': [float(x) for x in history['learning_rates']],
-                'epoch_times': [float(x) for x in history['epoch_times']],
-                'best_epoch': int(best_epoch),
-                'best_val_loss': float(best_val_loss),
-                'total_epochs': len(history['train_loss']),
-                'total_time': float(sum(history['epoch_times'])),
+                'epoch_times':    [float(x) for x in history['epoch_times']],
+                'best_epoch':     int(best_epoch),
+                'best_val_loss':  float(best_val_loss),
+                'total_epochs':   len(history['train_loss']),
+                'total_time':     float(sum(history['epoch_times'])),
+                'model_config': {
+                    'feature_dim':   config['feature_dim'],
+                    'latent_dim':    config['latent_dim'],
+                    'encoder_layers': config['encoder']['layer_sizes'],  # 
+                    'decoder_layers': config['decoder']['layer_sizes'],  # 
+                },
                 'hyperparameters': {
-                    'epochs': args.epochs,
-                    'learning_rate': args.learning_rate,
-                    'batch_size': args.batch_size,
-                    'optimizer': args.optimizer_type,
-                    'weight_decay': args.weight_decay,
-                    'gradient_clip_enabled': args.gradient_clip_enabled,
-                    'gradient_clip_max_norm': args.gradient_clip_max_norm,
-                    'early_stopping_enabled': args.early_stopping_enabled,
-                    'early_stopping_patience': args.early_stopping_patience
+                    'epochs':                   args.epochs,
+                    'learning_rate':            args.learning_rate,
+                    'batch_size':               args.batch_size,
+                    'optimizer':                args.optimizer_type,
+                    'weight_decay':             args.weight_decay,
+                    'gradient_clip_enabled':    args.gradient_clip_enabled,
+                    'gradient_clip_max_norm':   args.gradient_clip_max_norm,
+                    'early_stopping_enabled':   args.early_stopping_enabled,
+                    'early_stopping_patience':  args.early_stopping_patience
                 }
             }
-            
+
             with open(history_path, 'w') as f:
                 json.dump(history_dict, f, indent=2)
-            
             print(f"[trainer] ✓ Training history saved: {history_path}")
-            
-            # Also save as numpy for easy plotting
+
             np_history_path = os.path.join(args.training_history, 'training_history.npz')
-            np.savez(
-                np_history_path,
-                train_loss=np.array(history['train_loss']),
-                val_loss=np.array(history['val_loss']),
-                learning_rates=np.array(history['learning_rates']),
-                epoch_times=np.array(history['epoch_times'])
-            )
-            
+            np.savez(np_history_path,
+                     train_loss=np.array(history['train_loss']),
+                     val_loss=np.array(history['val_loss']),
+                     learning_rates=np.array(history['learning_rates']),
+                     epoch_times=np.array(history['epoch_times']))
             print(f"[trainer] ✓ Training history (numpy) saved: {np_history_path}")
-            
+
         except Exception as e:
             print(f"[trainer] ERROR: Failed to save training history: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         print(f"[trainer] ✓ Training pipeline completed successfully!")
 
     args:
-      # Datasets and model
       - --train_dataset
       - {inputPath: train_dataset}
       - --val_dataset
       - {inputPath: val_dataset}
       - --model_file
       - {inputPath: model_file}
-      
-      # Training hyperparameters
       - --epochs
       - {inputValue: epochs}
       - --learning_rate
       - {inputValue: learning_rate}
       - --batch_size
       - {inputValue: batch_size}
-      
-      # Optimizer
       - --optimizer_type
       - {inputValue: optimizer_type}
       - --beta1
@@ -756,26 +625,18 @@ implementation:
       - {inputValue: beta2}
       - --weight_decay
       - {inputValue: weight_decay}
-      
-      # Gradient clipping
       - --gradient_clip_enabled
       - {inputValue: gradient_clip_enabled}
       - --gradient_clip_max_norm
       - {inputValue: gradient_clip_max_norm}
-      
-      # Loss
       - --loss_eps
       - {inputValue: loss_eps}
-      
-      # Early stopping
       - --early_stopping_enabled
       - {inputValue: early_stopping_enabled}
       - --early_stopping_patience
       - {inputValue: early_stopping_patience}
       - --early_stopping_min_delta
       - {inputValue: early_stopping_min_delta}
-      
-      # Scheduler
       - --scheduler_enabled
       - {inputValue: scheduler_enabled}
       - --scheduler_type
@@ -784,22 +645,16 @@ implementation:
       - {inputValue: scheduler_factor}
       - --scheduler_patience
       - {inputValue: scheduler_patience}
-      
-      # Logging
       - --save_every_n_epochs
       - {inputValue: save_every_n_epochs}
       - --print_every_n_batches
       - {inputValue: print_every_n_batches}
-      
-      # Device
       - --device
       - {inputValue: device}
       - --num_workers
       - {inputValue: num_workers}
       - --random_seed
       - {inputValue: random_seed}
-      
-      # Outputs
       - --trained_model
       - {outputPath: trained_model}
       - --training_history
