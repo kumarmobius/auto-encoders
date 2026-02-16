@@ -301,7 +301,7 @@ implementation:
                 X_2d = X
             
             # Fit and transform
-            X_normalized = scaler.fit_transform(X_2d).astype(np.float32)
+            X_normalized = scaler.fit_transform(X_2d).astype(np.float16)
             
             # Reshape back to original shape if needed
             if len(original_shape) > 2:
@@ -312,7 +312,7 @@ implementation:
             logger.info("  Mean: %.6f, Std: %.6f", X_normalized.mean(), X_normalized.std())
             
             # Process masked values
-            M = M.astype(np.float32)
+            M = M.astype(np.float16)
             
             # Convert to PyTorch tensors for saving
             X_tensor = torch.FloatTensor(X_normalized)
