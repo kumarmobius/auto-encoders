@@ -1,4 +1,4 @@
-name: Dataset downloader and splitter With preprocessing v1
+name: Dataset downloader and splitter With preprocessing V1.2
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
@@ -70,7 +70,8 @@ implementation:
                 token = f.read().strip()
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
-
+        def get_tensor_size_mb(tensor):
+            return tensor.element_size() * tensor.nelement() / (1024 * 1024)
         def download_file(url):
             try:
                 logger.info("Downloading from: %s", url)
@@ -317,6 +318,10 @@ implementation:
             # Convert to PyTorch tensors for saving
             X_tensor = torch.FloatTensor(X_normalized)
             M_tensor = torch.FloatTensor(M)
+
+            logger.info("Full Tensor Memory Usage:")
+            logger.info("  X_tensor: %.2f MB", get_tensor_size_mb(X_tensor))
+            logger.info("  M_tensor: %.2f MB", get_tensor_size_mb(M_tensor))
             
             # ============================================
             # Save Full Tensors as Outputs
