@@ -1,4 +1,4 @@
-name: Mask Aware Autoencoder Builder V2
+name: Mask Aware Autoencoder Builder V2.1
 description: Build a Mask-Aware Autoencoder model in PyTorch from YAML configuration and save as .pth file
 inputs:
   # Model Architecture Parameters
@@ -103,9 +103,6 @@ implementation:
             return s.lower() in ['true', '1', 'yes']
 
         def parse_layers(layers_str):
-            """Parse comma-separated string into list of integers.
-            e.g. '1024,512,256' -> [1024, 512, 256]
-            """
             try:
                 return [int(x.strip()) for x in layers_str.split(",") if x.strip()]
             except ValueError as e:
