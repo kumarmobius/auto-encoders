@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v2
+name: Evaluate Mask Aware Autoencoder v2.1
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -35,7 +35,7 @@ implementation:
         import torch
         import torch.nn as nn
         from torch.utils.data import DataLoader, TensorDataset
-        
+
         parser = argparse.ArgumentParser(description="Evaluate Mask-Aware Autoencoder")
         parser.add_argument("--trained_model", type=str, required=True)
         parser.add_argument("--test_dataset", type=str, required=True)
@@ -50,371 +50,375 @@ implementation:
         parser.add_argument("--reconstruction_samples", type=str, required=True)
         parser.add_argument("--schema_json", type=str, required=True)
         args = parser.parse_args()
-        
+
         print("[evaluator] ============================================")
         print("[evaluator] Mask-Aware Autoencoder Evaluation")
         print("[evaluator] ============================================")
-        
+
         def str_to_bool(s):
             return s.lower() in ['true', '1', 'yes']
-        
+
         def ensure_dir_for(p):
             d = os.path.dirname(p)
             if d and not os.path.exists(d):
                 os.makedirs(d, exist_ok=True)
-        
-        # Auto-detect device
+
+        def get_activation(name):
+            activations = {
+                'relu': nn.ReLU(), 'tanh': nn.Tanh(), 'elu': nn.ELU(),
+                'leaky_relu': nn.LeakyReLU(), 'sigmoid': nn.Sigmoid(), 'none': None
+            }
+            return activations.get(name.lower(), nn.ReLU())
+
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[evaluator] Device: {device} (auto-detected)")
         if device.type == 'cuda':
             print(f"[evaluator] GPU: {torch.cuda.get_device_name(0)}")
-        
+
         torch.manual_seed(args.random_seed)
         np.random.seed(args.random_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.random_seed)
-        
         print(f"[evaluator] Random seed: {args.random_seed}")
-        
-        def get_activation(name):
-            activations = {
-                'relu': nn.ReLU(),
-                'tanh': nn.Tanh(),
-                'elu': nn.ELU(),
-                'leaky_relu': nn.LeakyReLU(),
-                'sigmoid': nn.Sigmoid(),
-                'none': None
-            }
-            return activations.get(name.lower(), nn.ReLU())
-        
+
+        # ============================================
+        # MAEEncoder — Dynamic N layers
+        #    Reads layer_sizes list (not layer1_units/layer2_units)
+        # ============================================
         class MAEEncoder(nn.Module):
-            def __init__(self, feature_dim, latent_dim, layer1_units, layer2_units, activation, dropout, batch_norm):
+            def __init__(self, feature_dim, latent_dim,
+                         layer_sizes, activation, dropout, batch_norm):
                 super(MAEEncoder, self).__init__()
+
                 input_dim = 2 * feature_dim
-                layers = []
-                layers.append(nn.Linear(input_dim, layer1_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer1_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                layers.append(nn.Linear(layer1_units, layer2_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer2_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                layers.append(nn.Linear(layer2_units, latent_dim))
+                prev_dim  = input_dim
+                layers    = []
+
+                print(f"[evaluator]   Encoder input : {input_dim} (features + mask)")
+                for idx, units in enumerate(layer_sizes):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    if activation is not None:
+                        layers.append(activation)
+                    if dropout > 0:
+                        layers.append(nn.Dropout(dropout))
+                    print(f"[evaluator]   Encoder Layer {idx + 1}: {prev_dim} -> {units}")
+                    prev_dim = units
+
+                layers.append(nn.Linear(prev_dim, latent_dim))
+                print(f"[evaluator]   Encoder Latent : {prev_dim} -> {latent_dim}")
+
                 self.encoder = nn.Sequential(*layers)
-            
+
             def forward(self, x, m):
-                x_in = torch.cat([x, m], dim=1)
-                return self.encoder(x_in)
-        
+                return self.encoder(torch.cat([x, m], dim=1))
+
+        # ============================================
+        #  MAEDecoder — Dynamic N layers
+        # ============================================
         class MAEDecoder(nn.Module):
-            def __init__(self, feature_dim, latent_dim, layer1_units, layer2_units, activation, dropout, batch_norm):
+            def __init__(self, feature_dim, latent_dim,
+                         layer_sizes, activation, dropout, batch_norm):
                 super(MAEDecoder, self).__init__()
-                layers = []
-                layers.append(nn.Linear(latent_dim, layer1_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer1_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                layers.append(nn.Linear(layer1_units, layer2_units))
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(layer2_units))
-                if activation is not None:
-                    layers.append(activation)
-                if dropout > 0:
-                    layers.append(nn.Dropout(dropout))
-                layers.append(nn.Linear(layer2_units, feature_dim))
+
+                prev_dim = latent_dim
+                layers   = []
+
+                print(f"[evaluator]   Decoder input : {latent_dim} (latent)")
+                for idx, units in enumerate(layer_sizes):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    if activation is not None:
+                        layers.append(activation)
+                    if dropout > 0:
+                        layers.append(nn.Dropout(dropout))
+                    print(f"[evaluator]   Decoder Layer {idx + 1}: {prev_dim} -> {units}")
+                    prev_dim = units
+
+                layers.append(nn.Linear(prev_dim, feature_dim))
+                print(f"[evaluator]   Decoder Output : {prev_dim} -> {feature_dim}")
+
                 self.decoder = nn.Sequential(*layers)
-            
+
             def forward(self, z):
                 return self.decoder(z)
-        
+
         class MaskAwareAutoencoder(nn.Module):
             def __init__(self, feature_dim, latent_dim, encoder_config, decoder_config):
                 super(MaskAwareAutoencoder, self).__init__()
                 self.feature_dim = feature_dim
-                self.latent_dim = latent_dim
-                self.encoder = MAEEncoder(feature_dim, latent_dim, encoder_config['layer1_units'], encoder_config['layer2_units'], encoder_config['activation'], encoder_config['dropout'], encoder_config['batch_norm'])
-                self.decoder = MAEDecoder(feature_dim, latent_dim, decoder_config['layer1_units'], decoder_config['layer2_units'], decoder_config['activation'], decoder_config['dropout'], decoder_config['batch_norm'])
-            
+                self.latent_dim  = latent_dim
+                self.encoder = MAEEncoder(
+                    feature_dim = feature_dim,
+                    latent_dim  = latent_dim,
+                    layer_sizes = encoder_config['layer_sizes'],  #  fixed key
+                    activation  = encoder_config['activation'],
+                    dropout     = encoder_config['dropout'],
+                    batch_norm  = encoder_config['batch_norm']
+                )
+                self.decoder = MAEDecoder(
+                    feature_dim = feature_dim,
+                    latent_dim  = latent_dim,
+                    layer_sizes = decoder_config['layer_sizes'],  #  fixed key
+                    activation  = decoder_config['activation'],
+                    dropout     = decoder_config['dropout'],
+                    batch_norm  = decoder_config['batch_norm']
+                )
+
             def forward(self, x, m):
-                z = self.encoder(x, m)
+                z     = self.encoder(x, m)
                 x_hat = self.decoder(z)
                 return x_hat, z
-        
+
+        # ============================================
+        # Metrics
+        # ============================================
         def masked_mse(x_hat, x_true, mask, eps=1e-6):
             err = torch.square(x_hat - x_true) * mask
-            num = torch.sum(err)
-            den = torch.sum(mask)
-            den = torch.clamp(den, min=eps)
-            return (num / den).item()
-        
+            return (torch.sum(err) / torch.clamp(torch.sum(mask), min=eps)).item()
+
         def masked_mae(x_hat, x_true, mask, eps=1e-6):
             err = torch.abs(x_hat - x_true) * mask
-            num = torch.sum(err)
-            den = torch.sum(mask)
-            den = torch.clamp(den, min=eps)
-            return (num / den).item()
-        
+            return (torch.sum(err) / torch.clamp(torch.sum(mask), min=eps)).item()
+
         def masked_rmse(x_hat, x_true, mask, eps=1e-6):
-            mse = masked_mse(x_hat, x_true, mask, eps)
-            return np.sqrt(mse)
-        
+            return np.sqrt(masked_mse(x_hat, x_true, mask, eps))
+
         def compute_masked_metrics(x_hat, x_true, mask, eps=1e-6):
-            metrics = {}
-            metrics['masked_mse'] = masked_mse(x_hat, x_true, mask, eps)
-            metrics['masked_mae'] = masked_mae(x_hat, x_true, mask, eps)
-            metrics['masked_rmse'] = masked_rmse(x_hat, x_true, mask, eps)
-            return metrics
-        
-        def compute_per_sample_metrics(x_hat, x_true, mask, eps=1e-6):
-            err_squared = torch.square(x_hat - x_true) * mask
-            err_abs = torch.abs(x_hat - x_true) * mask
-            num_mse = torch.sum(err_squared, dim=1)
-            num_mae = torch.sum(err_abs, dim=1)
-            den = torch.sum(mask, dim=1)
-            den = torch.clamp(den, min=eps)
-            per_sample_mse = (num_mse / den).cpu().numpy()
-            per_sample_mae = (num_mae / den).cpu().numpy()
-            per_sample_rmse = np.sqrt(per_sample_mse)
-            
-            stats = {
-                'mse': {
-                    'mean': float(np.mean(per_sample_mse)),
-                    'std': float(np.std(per_sample_mse)),
-                    'min': float(np.min(per_sample_mse)),
-                    'max': float(np.max(per_sample_mse)),
-                    'median': float(np.median(per_sample_mse))
-                },
-                'mae': {
-                    'mean': float(np.mean(per_sample_mae)),
-                    'std': float(np.std(per_sample_mae)),
-                    'min': float(np.min(per_sample_mae)),
-                    'max': float(np.max(per_sample_mae)),
-                    'median': float(np.median(per_sample_mae))
-                },
-                'rmse': {
-                    'mean': float(np.mean(per_sample_rmse)),
-                    'std': float(np.std(per_sample_rmse)),
-                    'min': float(np.min(per_sample_rmse)),
-                    'max': float(np.max(per_sample_rmse)),
-                    'median': float(np.median(per_sample_rmse))
-                }
+            return {
+                'masked_mse':  masked_mse(x_hat, x_true, mask, eps),
+                'masked_mae':  masked_mae(x_hat, x_true, mask, eps),
+                'masked_rmse': masked_rmse(x_hat, x_true, mask, eps)
             }
-            return stats
-        
+
+        def compute_per_sample_metrics(x_hat, x_true, mask, eps=1e-6):
+            err_sq  = torch.square(x_hat - x_true) * mask
+            err_abs = torch.abs(x_hat - x_true) * mask
+            den     = torch.clamp(torch.sum(mask, dim=1), min=eps)
+            ps_mse  = (torch.sum(err_sq,  dim=1) / den).cpu().numpy()
+            ps_mae  = (torch.sum(err_abs, dim=1) / den).cpu().numpy()
+            ps_rmse = np.sqrt(ps_mse)
+
+            def stats(arr):
+                return {'mean': float(np.mean(arr)), 'std': float(np.std(arr)),
+                        'min':  float(np.min(arr)),  'max': float(np.max(arr)),
+                        'median': float(np.median(arr))}
+
+            return {'mse': stats(ps_mse), 'mae': stats(ps_mae), 'rmse': stats(ps_rmse)}
+
+        # ============================================
+        # Load Model
+        # ============================================
         try:
             print(f"[evaluator] Loading trained model from: {args.trained_model}")
+
             model_files = list(Path(args.trained_model).glob("*.pth"))
             if not model_files:
                 raise FileNotFoundError(f"No .pth file found in {args.trained_model}")
+
             model_path = model_files[0]
             print(f"[evaluator] Model file: {model_path}")
+
             checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-            config = checkpoint['model_config']
+            config     = checkpoint['model_config']
+
             print(f"[evaluator] Model config loaded")
-            print(f"[evaluator]   Feature dim: {config['feature_dim']}")
-            print(f"[evaluator]   Latent dim: {config['latent_dim']}")
-            
+            print(f"[evaluator]   Feature dim    : {config['feature_dim']}")
+            print(f"[evaluator]   Latent dim     : {config['latent_dim']}")
+            print(f"[evaluator]   Encoder layers : {config['encoder']['layer_sizes']}")
+            print(f"[evaluator]   Decoder layers : {config['decoder']['layer_sizes']}")
+
+            # Use layer_sizes (not layer1_units/layer2_units)
             encoder_config = {
-                'layer1_units': config['encoder']['layer1_units'],
-                'layer2_units': config['encoder']['layer2_units'],
-                'activation': get_activation(config['encoder']['activation']),
-                'dropout': config['encoder']['dropout'],
-                'batch_norm': str_to_bool(config['encoder']['batch_norm'])
+                'layer_sizes': config['encoder']['layer_sizes'],
+                'activation':  get_activation(config['encoder']['activation']),
+                'dropout':     config['encoder']['dropout'],
+                'batch_norm':  str_to_bool(str(config['encoder']['batch_norm']))
             }
             decoder_config = {
-                'layer1_units': config['decoder']['layer1_units'],
-                'layer2_units': config['decoder']['layer2_units'],
-                'activation': get_activation(config['decoder']['activation']),
-                'dropout': config['decoder']['dropout'],
-                'batch_norm': str_to_bool(config['decoder']['batch_norm'])
+                'layer_sizes': config['decoder']['layer_sizes'],
+                'activation':  get_activation(config['decoder']['activation']),
+                'dropout':     config['decoder']['dropout'],
+                'batch_norm':  str_to_bool(str(config['decoder']['batch_norm']))
             }
-            
-            model = MaskAwareAutoencoder(feature_dim=config['feature_dim'], latent_dim=config['latent_dim'], encoder_config=encoder_config, decoder_config=decoder_config)
+
+            model = MaskAwareAutoencoder(
+                feature_dim    = config['feature_dim'],
+                latent_dim     = config['latent_dim'],
+                encoder_config = encoder_config,
+                decoder_config = decoder_config
+            )
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(device)
             model.eval()
-            print(f"[evaluator] Model loaded and moved to {device}")
-            print(f"[evaluator] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+            print(f"[evaluator] ✓ Model loaded and moved to {device}")
+            print(f"[evaluator]   Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to load model: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
+        # ============================================
+        # Load Test Dataset
+        # ============================================
         try:
             print(f"[evaluator] Loading test dataset...")
+
             test_files = list(Path(args.test_dataset).glob("*.pt"))
             if not test_files:
                 raise FileNotFoundError(f"No .pt file found in {args.test_dataset}")
-            test_data = torch.load(test_files[0], weights_only=False)
+
+            test_data    = torch.load(test_files[0], weights_only=False)
             test_dataset = TensorDataset(test_data['X'], test_data['M'])
-            print(f"[evaluator] Test samples: {len(test_dataset)}")
-            
-            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=(device.type == 'cuda'), drop_last=False)
-            print(f"[evaluator] Test batches: {len(test_loader)}")
+            print(f"[evaluator] Test samples : {len(test_dataset)}")
+
+            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                                     num_workers=args.num_workers, pin_memory=(device.type == 'cuda'),
+                                     drop_last=False)
+            print(f"[evaluator] Test batches : {len(test_loader)}")
+
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to load test dataset: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
+        # ============================================
+        # Evaluate
+        # ============================================
         try:
             print(f"[evaluator] ============================================")
             print(f"[evaluator] Starting Evaluation")
             print(f"[evaluator] ============================================")
-            
-            all_x_true = []
-            all_x_hat = []
-            all_masks = []
-            all_latents = []
-            batch_metrics = []
-            
+
+            all_x_true, all_x_hat, all_masks, all_latents = [], [], [], []
+
             with torch.no_grad():
                 for batch_idx, (xb, mb) in enumerate(test_loader):
-                    xb = xb.to(device)
-                    mb = mb.to(device)
+                    xb    = xb.to(device)
+                    mb    = mb.to(device)
                     x_hat, z = model(xb, mb)
-                    batch_metric = compute_masked_metrics(x_hat, xb, mb, args.loss_eps)
-                    batch_metrics.append(batch_metric)
                     all_x_true.append(xb.cpu())
                     all_x_hat.append(x_hat.cpu())
                     all_masks.append(mb.cpu())
                     all_latents.append(z.cpu())
-                    
+
                     if (batch_idx + 1) % 10 == 0:
                         print(f"[evaluator] Processed {batch_idx + 1}/{len(test_loader)} batches")
-            
-            all_x_true = torch.cat(all_x_true, dim=0)
-            all_x_hat = torch.cat(all_x_hat, dim=0)
-            all_masks = torch.cat(all_masks, dim=0)
+
+            all_x_true  = torch.cat(all_x_true,  dim=0)
+            all_x_hat   = torch.cat(all_x_hat,   dim=0)
+            all_masks   = torch.cat(all_masks,   dim=0)
             all_latents = torch.cat(all_latents, dim=0)
-            
+
             print(f"[evaluator] Evaluation complete. Processed {len(all_x_true)} samples")
-            
+
             overall_metrics = compute_masked_metrics(all_x_hat, all_x_true, all_masks, args.loss_eps)
-            
+
             print(f"[evaluator] ============================================")
             print(f"[evaluator] Overall Masked Metrics")
             print(f"[evaluator] ============================================")
-            print(f"[evaluator] Masked MSE:  {overall_metrics['masked_mse']:.6f}")
-            print(f"[evaluator] Masked MAE:  {overall_metrics['masked_mae']:.6f}")
-            print(f"[evaluator] Masked RMSE: {overall_metrics['masked_rmse']:.6f}")
+            print(f"[evaluator] Masked MSE  : {overall_metrics['masked_mse']:.6f}")
+            print(f"[evaluator] Masked MAE  : {overall_metrics['masked_mae']:.6f}")
+            print(f"[evaluator] Masked RMSE : {overall_metrics['masked_rmse']:.6f}")
             print(f"[evaluator] ============================================")
-            
+
             per_sample_stats = None
             if str_to_bool(args.compute_per_sample_metrics):
                 print(f"[evaluator] Computing per-sample statistics...")
                 per_sample_stats = compute_per_sample_metrics(all_x_hat, all_x_true, all_masks, args.loss_eps)
-                print(f"[evaluator] ============================================")
-                print(f"[evaluator] Per-Sample Statistics")
-                print(f"[evaluator] ============================================")
                 print(f"[evaluator] MSE  - Mean: {per_sample_stats['mse']['mean']:.6f}, Std: {per_sample_stats['mse']['std']:.6f}")
                 print(f"[evaluator] MAE  - Mean: {per_sample_stats['mae']['mean']:.6f}, Std: {per_sample_stats['mae']['std']:.6f}")
                 print(f"[evaluator] RMSE - Mean: {per_sample_stats['rmse']['mean']:.6f}, Std: {per_sample_stats['rmse']['std']:.6f}")
-                print(f"[evaluator] ============================================")
-        
+
         except Exception as e:
             print(f"[evaluator] ERROR: Evaluation failed: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
+        # ============================================
+        # Save Schema JSON
+        # ============================================
         try:
-            print(f"[evaluator] Saving schema JSON...")
-            
-            # Get current epoch timestamp
             current_timestamp = int(time.time())
-            
             schema_data = {
                 'timestamp': current_timestamp,
-                'mae': float(overall_metrics['masked_mae']),
-                'mse': float(overall_metrics['masked_mse']),
-                'rmse': float(overall_metrics['masked_rmse'])
+                'mae':       float(overall_metrics['masked_mae']),
+                'mse':       float(overall_metrics['masked_mse']),
+                'rmse':      float(overall_metrics['masked_rmse'])
             }
-            
-            # Ensure parent directory exists
             ensure_dir_for(args.schema_json)
-            
-            # Write JSON directly to the schema_json path
             with open(args.schema_json, "w") as f:
                 json.dump(schema_data, f, indent=2)
-            
-            print(f"[evaluator] Schema JSON saved to: {args.schema_json}")
-            print(f"[evaluator]   Timestamp: {current_timestamp}")
-            print(f"[evaluator]   MAE: {schema_data['mae']:.2f}")
-            print(f"[evaluator]   MSE: {schema_data['mse']:.2f}")
-            print(f"[evaluator]   RMSE: {schema_data['rmse']:.2f}")
+            print(f"[evaluator] ✓ Schema JSON saved to: {args.schema_json}")
+
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save schema JSON: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
+        # ============================================
+        # Save Evaluation Results
+        # ============================================
         try:
-            print(f"[evaluator] Saving evaluation results...")
-            # Ensure parent directory exists
             ensure_dir_for(args.evaluation_results)
-            
             results = {
-                'overall_metrics': overall_metrics,
+                'overall_metrics':       overall_metrics,
                 'per_sample_statistics': per_sample_stats,
-                'test_samples': len(all_x_true),
+                'test_samples':          len(all_x_true),
                 'model_info': {
-                    'feature_dim': config['feature_dim'],
-                    'latent_dim': config['latent_dim'],
+                    'feature_dim':   config['feature_dim'],
+                    'latent_dim':    config['latent_dim'],
+                    'encoder_layers': config['encoder']['layer_sizes'],  # 
+                    'decoder_layers': config['decoder']['layer_sizes'],  # 
                     'trained_epoch': int(checkpoint.get('epoch', 0)),
                     'best_val_loss': float(checkpoint.get('best_val_loss', 0.0))
                 },
                 'evaluation_config': {
                     'batch_size': args.batch_size,
-                    'loss_eps': args.loss_eps,
-                    'device': str(device)
+                    'loss_eps':   args.loss_eps,
+                    'device':     str(device)
                 }
             }
-            
-            # Write directly to the evaluation_results path
             with open(args.evaluation_results, 'w') as f:
                 json.dump(results, f, indent=2)
-            print(f"[evaluator] Evaluation results saved: {args.evaluation_results}")
+            print(f"[evaluator] ✓ Evaluation results saved: {args.evaluation_results}")
+
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save evaluation results: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
+        # ============================================
+        # Save Reconstruction Samples
+        # ============================================
         try:
             if str_to_bool(args.save_reconstructions):
-                print(f"[evaluator] Saving reconstruction samples...")
-                # Ensure parent directory exists
                 ensure_dir_for(args.reconstruction_samples)
-                
                 num_samples = min(args.num_reconstruction_samples, len(all_x_true))
-                
-                # Write directly to the reconstruction_samples path
                 torch.save({
-                    'x_true': all_x_true[:num_samples],
+                    'x_true':         all_x_true[:num_samples],
                     'x_reconstructed': all_x_hat[:num_samples],
-                    'masks': all_masks[:num_samples],
-                    'latents': all_latents[:num_samples]
+                    'masks':          all_masks[:num_samples],
+                    'latents':        all_latents[:num_samples]
                 }, args.reconstruction_samples)
-                print(f"[evaluator] Saved {num_samples} reconstruction samples: {args.reconstruction_samples}")
+                print(f"[evaluator] ✓ Saved {num_samples} reconstruction samples: {args.reconstruction_samples}")
+
         except Exception as e:
             print(f"[evaluator] ERROR: Failed to save reconstruction samples: {e}")
             traceback.print_exc()
             sys.exit(1)
-        
+
         print(f"[evaluator] ============================================")
         print(f"[evaluator] Evaluation Complete!")
         print(f"[evaluator] ============================================")
-        print(f"[evaluator] Results: {args.evaluation_results}")
+        print(f"[evaluator] Results    : {args.evaluation_results}")
         print(f"[evaluator] Schema JSON: {args.schema_json}")
-        print(f"[evaluator] Masked MSE: {overall_metrics['masked_mse']:.6f}")
-        print(f"[evaluator] Masked MAE: {overall_metrics['masked_mae']:.6f}")
+        print(f"[evaluator] Masked MSE : {overall_metrics['masked_mse']:.6f}")
+        print(f"[evaluator] Masked MAE : {overall_metrics['masked_mae']:.6f}")
         print(f"[evaluator] Masked RMSE: {overall_metrics['masked_rmse']:.6f}")
         print(f"[evaluator] ============================================")
 
