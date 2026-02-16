@@ -2,7 +2,6 @@ name: Dataset downloader and splitter With preprocessing V1.2
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
-  - {name: bearer_token, type: string, optional: true, default: ""}
   - {name: test_size, type: Float, optional: true, default: "0.3"}
   - {name: val_split, type: Float, optional: true, default: "0.5"}
   - {name: random_state, type: Integer, optional: true, default: "42"}
@@ -41,7 +40,6 @@ implementation:
         parser = argparse.ArgumentParser()
         parser.add_argument('--tensor_values_cdn', required=True)
         parser.add_argument('--masked_tensor_values_cdn', required=True)
-        parser.add_argument('--bearer_token', default="")
         parser.add_argument('--test_size', type=float, default=0.3)
         parser.add_argument('--val_split', type=float, default=0.5)
         parser.add_argument('--random_state', type=int, default=42)
@@ -63,13 +61,8 @@ implementation:
         session.mount("http://", HTTPAdapter(max_retries=retry))
         session.mount("https://", HTTPAdapter(max_retries=retry))
 
-        # Setup headers with bearer token if provided
         headers = {}
-        if args.bearer_token and os.path.exists(args.bearer_token):
-            with open(args.bearer_token, "r") as f:
-                token = f.read().strip()
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
+
         def get_tensor_size_mb(tensor):
             return tensor.element_size() * tensor.nelement() / (1024 * 1024)
         def download_file(url):
@@ -486,8 +479,6 @@ implementation:
       - {inputValue: tensor_values_cdn}
       - --masked_tensor_values_cdn
       - {inputValue: masked_tensor_values_cdn}
-      - --bearer_token
-      - {inputPath: bearer_token}
       - --test_size
       - {inputValue: test_size}
       - --val_split
