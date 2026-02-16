@@ -1,4 +1,4 @@
-name: Dataset downloader and splitter With preprocessing V1.2
+name: Dataset downloader and splitter With preprocessing V1.3
 inputs:
   - {name: tensor_values_cdn, type: String, optional: false}
   - {name: masked_tensor_values_cdn, type: String, optional: false}
@@ -283,11 +283,11 @@ implementation:
             # ============================================
             # Apply Standard Scaler
             # ============================================
-            logger.info("Applying per-feature non-zero Standard scaling (preserve zeros)...")
+            logger.info("Applying per-feature scale-only robust scaling (no centering, preserve zeros)...")
             
-            eps = 1e-6           # small value to avoid division by zero
-            clip_value = 5.0     # final clipping range [-clip_value, clip_value]
-            min_nonzero = 8      # if a column has fewer than this many non-zero entries, skip scaling
+            eps = 1e-6
+            clip_value = 5.0
+            min_nonzero = 8
             
             # Prepare X_2d (2D view) - do not modify original_shape usage downstream
             original_shape = X.shape
@@ -302,36 +302,29 @@ implementation:
             logger.info("Scaling %d features across %d samples", n_features, n_samples)
             
             # Preallocate per-feature stats (saved for later)
-            means = np.zeros(n_features, dtype=np.float32)
-            stds = np.ones(n_features, dtype=np.float32)
-            scaled = np.zeros_like(X_2d, dtype=np.float32)  # target array
-            
-            # Decide strategy based on memory: full-vectorized if small, otherwise column-chunks
+            # Preallocate scale factors only (no center/offset)
+            scales = np.ones(n_features, dtype=np.float32)
+            scaled = np.zeros_like(X_2d, dtype=np.float32)
+
             bytes_estimate = X_2d.nbytes
-            memory_threshold = 1_000_000_000  # ~1GB; tune if needed
-            
+            memory_threshold = 1_000_000_000  # ~1GB
+
             if bytes_estimate < memory_threshold:
-                # Vectorized path but still operate column-wise for non-zero mask handling
                 nz_mask = X_2d != 0
                 for j in range(n_features):
                     nz_idx = nz_mask[:, j]
                     cnt = nz_idx.sum()
                     if cnt >= min_nonzero:
                         col = X_2d[nz_idx, j].astype(np.float64)
-                        m = float(col.mean())
-                        s = float(col.std())
-                        if s < eps:
-                            s = eps
-                        means[j] = m
-                        stds[j] = s
-                        # transform only non-zero entries
-                        scaled[nz_idx, j] = ((col - m) / s).astype(np.float32)
+                        q75 = float(np.percentile(np.abs(col), 75))
+                        if q75 < eps:
+                            q75 = eps
+                        scales[j] = q75
+                        # Divide only — zero boundary fully preserved
+                        scaled[nz_idx, j] = (col / q75).astype(np.float32)
                     else:
-                        # not enough non-zero samples: leave zeros intact (already zero in scaled)
-                        means[j] = 0.0
-                        stds[j] = 1.0
+                        scales[j] = 1.0
             else:
-                # Chunked path for huge matrices (iterate feature blocks)
                 block = 1024
                 for start in range(0, n_features, block):
                     end = min(n_features, start + block)
@@ -341,42 +334,35 @@ implementation:
                         cnt = int(nz_idx.sum())
                         if cnt >= min_nonzero:
                             col_nz = col[nz_idx].astype(np.float64)
-                            m = float(col_nz.mean())
-                            s = float(col_nz.std())
-                            if s < eps:
-                                s = eps
-                            means[j] = m
-                            stds[j] = s
-                            scaled[nz_idx, j] = ((col_nz - m) / s).astype(np.float32)
+                            q75 = float(np.percentile(np.abs(col_nz), 75))
+                            if q75 < eps:
+                                q75 = eps
+                            scales[j] = q75
+                            scaled[nz_idx, j] = (col_nz / q75).astype(np.float32)
                         else:
-                            means[j] = 0.0
-                            stds[j] = 1.0
-            
-            # Clip extremes to stabilize downstream training
+                            scales[j] = 1.0
+
             np.clip(scaled, -clip_value, clip_value, out=scaled)
-            
-            # Reshape back if needed
+
             if len(original_shape) > 2:
                 X_normalized = scaled.reshape(original_shape).astype(np.float32)
                 logger.info("Reshaped back to original: %s", X_normalized.shape)
             else:
                 X_normalized = scaled.astype(np.float32)
-            
-            logger.info("✓ Per-feature non-zero Standard scaling applied")
-            logger.info("  Example stats - features with nonzero counts:")
-            # log some example features stats for sanity
-            sample_features = np.where(stds != 1.0)[0][:5]
+
+            logger.info("✓ Scale-only robust scaling applied — zero boundary preserved")
+            sample_features = np.where(scales != 1.0)[0][:5]
             for f in sample_features:
-                logger.info("    feat %d -> mean %.6f std %.6f", int(f), float(means[f]), float(stds[f]))
+                logger.info("    feat %d -> scale(q75_abs) %.6f", int(f), float(scales[f]))
             
             # Save scaler metadata for reproducibility (means/stds)
             scaler_meta_dir = args.train_dataset
             os.makedirs(scaler_meta_dir, exist_ok=True)
-            np.save(os.path.join(scaler_meta_dir, "scaler_means.npy"), means)
-            np.save(os.path.join(scaler_meta_dir, "scaler_stds.npy"), stds)
+            np.save(os.path.join(scaler_meta_dir, "scaler_scales.npy"), scales)
             with open(os.path.join(scaler_meta_dir, "scaler_info.json"), "w") as f:
                 json.dump({
-                    "method": "per_feature_nonzero_standard",
+                    "method": "per_feature_nonzero_scale_only_robust",
+                    "scale_stat": "q75_abs",
                     "eps": eps,
                     "clip_value": clip_value,
                     "min_nonzero": int(min_nonzero),
@@ -534,7 +520,7 @@ implementation:
                     "nan_count_removed": int(nan_count),
                     "posinf_count_removed": int(posinf_count),
                     "neginf_count_removed": int(neginf_count),
-                    "scaler_applied": "StandardScaler",
+                    "scaler_applied": "ScaleOnly_RobustScaler (q75_abs, no centering)",
                     "final_mean": float(X_normalized.mean()),
                     "final_std": float(X_normalized.std())
                 }
