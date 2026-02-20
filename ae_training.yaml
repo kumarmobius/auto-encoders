@@ -1,4 +1,4 @@
-name: Mask Aware Autoencoder Trainer v1.1
+name: Mask Aware Autoencoder Trainer v1.2
 description: Train Mask-Aware Autoencoder model with training/validation datasets and save trained model
 inputs:
   # Dataset inputs
@@ -317,13 +317,13 @@ implementation:
             if not train_files:
                 raise FileNotFoundError(f"No .pt file found in {args.train_dataset}")
             train_data    = torch.load(train_files[0])
-            train_dataset = TensorDataset(train_data['X'], train_data['M'])
+            train_dataset = TensorDataset(train_data['X'].float(), train_data['M'].float())
 
             val_files = list(Path(args.val_dataset).glob("*.pt"))
             if not val_files:
                 raise FileNotFoundError(f"No .pt file found in {args.val_dataset}")
             val_data    = torch.load(val_files[0])
-            val_dataset = TensorDataset(val_data['X'], val_data['M'])
+            val_dataset = TensorDataset(val_data['X'].float(), val_data['M'].float())
 
             print(f"[trainer] ✓ Datasets loaded")
             print(f"[trainer]   Train samples : {len(train_dataset)}")
