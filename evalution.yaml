@@ -1,4 +1,4 @@
-name: Evaluate Mask Aware Autoencoder v2.1
+name: Evaluate Mask Aware Autoencoder v2.2
 description: Evaluate Mask-Aware Autoencoder model on test dataset with masked metrics
 inputs:
   - {name: trained_model, type: Model, description: "Trained model file (.pth)"}
@@ -273,7 +273,9 @@ implementation:
                 raise FileNotFoundError(f"No .pt file found in {args.test_dataset}")
 
             test_data    = torch.load(test_files[0], weights_only=False)
-            test_dataset = TensorDataset(test_data['X'], test_data['M'])
+            X = test_data['X'].float()   # cast float16 → float32 if needed
+            M = test_data['M'].float()   # same for mask
+            test_dataset = TensorDataset(X, M)
             print(f"[evaluator] Test samples : {len(test_dataset)}")
 
             test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
